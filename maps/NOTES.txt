@@ -84,3 +84,7 @@ the import raise (generators/duckdb.py parses at import; reviewer f09: KEYWORDS 
 Selector side: Ctx.imptime in selector/rules.py, added to every class- or module-level statement edit (_class_level): the tests that import (imports.bin plus
 lazyimp.bin, cold) every such M other than the edited file itself; a lambda-body edit uses only the ranges that overlap its lambda; a docstring-only edit adds nothing.
 Rebuild: PYTHONHASHSEED=0 python -I tools/impexec.py --src <pinned sqlglot checkout> --out maps/impexec.bin
+Second half (rules.py _own_import_risk): an edit outside function bodies that can make the EDITED module raise while it imports (the holding statement is not a plain
+assignment of a literal that cannot raise: a call such as exp.maybe_parse("...") parses at class level in generators/duckdb.py, 1/0, an unknown name) selects
+ctx.wide(path): every test that imports the module, lazily or not (this narrows ruling L35: a labelled case, i01, showed it). Statements whose only difference is
+bool/number/None constants, docstring text and lambda bodies are exempt. Labelled by real full suites: g00 (reviewer f09) to g05 and i01 (see plan/t28-import-time.md).
