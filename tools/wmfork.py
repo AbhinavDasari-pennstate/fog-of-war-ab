@@ -63,6 +63,17 @@ def _collect(dirpath: str) -> dict:
     return summ
 
 
+class _Watch:
+    """Collects every non-passing report logged while the child runs the test (subtest failures included)."""
+
+    def __init__(self):
+        self.bad = []
+
+    def pytest_runtest_logreport(self, report):
+        if report.outcome != "passed":
+            self.bad.append((report.nodeid, report.when, report.outcome))
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_protocol(item, nextitem):
     from _pytest.runner import runtestprotocol
@@ -94,10 +105,12 @@ def pytest_runtest_protocol(item, nextitem):
             rt._fd[1] = -1
             for key, mask in list(rt.SEEN.items()):  # what the parent recorded (import, collection) counts for this test
                 rt._emit(key, mask)
+            watch = _Watch()  # pytest 9 subtests report a failure through pytest_runtest_logreport, not in the returned list
+            item.config.pluginmanager.register(watch, "wmwatch")
             reports = runtestprotocol(item, nextitem=None, log=False)
             hook = item.config.hook
             payload = pickle.dumps([hook.pytest_report_to_serializable(config=item.config, report=rep) for rep in reports])
-            ok = all(rep.outcome == "passed" for rep in reports)
+            ok = all(rep.outcome == "passed" for rep in reports) and not watch.bad
             summ = _collect(work)
             if num is not None and ok:
                 res = os.environ["WM_RES"]

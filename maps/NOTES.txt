@@ -39,3 +39,9 @@ sqlglot/__init__.py is imported by 1617 of the 1620 tests (the three test_sqlglo
 Lines in importtime.bin ran at import or collection time: their test set says who executed them lazily, not who depends on them. Use names/classes/files for those lines.
 Lines in unstable.bin had a different test set in two of the runs (lazy or cached state): treat their test set as a lower bound.
 Rebuild: bash tools/run_instrumented.sh instr <src> <dir> (FORK mode: MAPS_FORK=1 and -p tools.forkrun, see Makefile maps target), then python tools/build_maps.py build --run <dirs...>.
+
+--- sequential coverage pass (T24) ---
+tools/run_seqcov.sh: the whole suite in ONE process, in collection order, -n 0, no fork, no preimport, PYTHONHASHSEED=0, with tools.covctx contexts.
+It was merged with tools/merge_seqcov.py into lines.bin, files.bin, classes.bin, names.bin, unstable.bin (sets.bin extended, committed set ids unchanged).
+Why: tests/test_dialect_entry_points.py clears Dialect._classes, so tests after it re-run Dialect._try_load's registration loop (dialect.py 248 to 257),
+which no forked or pre-imported run executes. 5124 lines gained tests; unstable lines 7234 to 11465 (lines whose test set differs between runs stay wide).

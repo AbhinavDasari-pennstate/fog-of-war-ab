@@ -66,6 +66,7 @@ def main():
     ap.add_argument("--res", nargs="+", required=True)
     ap.add_argument("--res-b", nargs="+", default=[], help="seed directories of the second harness (tools/wm_perfile.sh); a site's "
                     "mask is the OR over both harnesses, and a test needs a result in every directory of both")
+    ap.add_argument("--res-c", nargs="+", default=[], help="seed directories of harness C (tools/wmseq_seeds.sh): whole suite in one process, in order")
     ap.add_argument("--old")
     ap.add_argument("--min-seeds", type=int, default=3)
     ap.add_argument("--out", default=os.path.join(ROOT, "maps", "weakmut.bin"))
@@ -80,25 +81,25 @@ def main():
             old = d["tests"]
     recorded, ids, groups = 0, {}, {}
     n_fork = n_old = n_unrec = unstable_total = 0
+    harnesses = [d for d in (a.res, a.res_b, a.res_c) if d]
     for n in sorted(tests):
-        summ = load_test(n, tests[n], a.res)
-        if summ is not None and a.res_b:
-            b = load_test(n, tests[n], a.res_b)
-            if b is None:
-                summ = None
-            else:
-                for k, m in b[0].items():
-                    summ[0][k] = summ[0].get(k, 0) | m
-                summ = (summ[0], summ[1] + b[1])
-        if summ is not None:
-            summ, unstable = summ
+        parts = [load_test(n, tests[n], d) for d in harnesses]
+        have = [p for p in parts if p is not None]
+        summ, unstable = {}, 0
+        for one, u in have:  # OR over the harnesses that recorded this test
+            unstable += u
+            for k, m in one.items():
+                summ[k] = summ.get(k, 0) | m
+        if len(have) == len(parts):
             unstable_total += unstable
             n_fork += 1
         elif n in old and old[n]["id"] == tests[n]:
-            summ = {}
+            # a harness has no result for this test: keep what the others recorded and add the per-process entry
             for rel, per in old[n]["sites"].items():
                 for (l, c, el, ec, kind), mask in per.items():
-                    summ[f"{rel}:{l}:{c}:{el}:{ec}:{kind}"] = mask
+                    key = f"{rel}:{l}:{c}:{el}:{ec}:{kind}"
+                    summ[key] = summ.get(key, 0) | mask
+            unstable_total += unstable
             n_old += 1
         else:
             n_unrec += 1
@@ -118,7 +119,7 @@ def main():
     with open(a.out, "wb") as f:
         f.write(blob)
     nsites = sum(len(p) for p in sites.values())
-    print(f"recorded {len(ids)} of {len(tests)} tests ({n_fork} by the fork run, {n_old} from --old, {n_unrec} unrecorded); "
+    print(f"recorded {len(ids)} of {len(tests)} tests ({n_fork} by every harness, {n_old} partly or wholly from --old, {n_unrec} unrecorded); "
           f"{nsites} sites, {sum(len(g) for p in sites.values() for g in p.values())} groups, "
           f"{unstable_total} unstable test-sites set to all bits; {len(blob)} bytes")
 
