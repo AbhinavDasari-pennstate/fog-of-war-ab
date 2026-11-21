@@ -183,6 +183,66 @@ def droppable(kind, j, mask: int) -> bool:
     return False  # B and N: a swap or a removed `not` can differ on any evaluation
 
 
+_STORE_METHODS = frozenset({"setdefault", "update", "append", "add", "pop", "popitem", "clear", "extend", "insert", "remove", "discard"})
+
+
+def _root(node):
+    while isinstance(node, (ast.Attribute, ast.Subscript, ast.Call)):
+        node = node.func if isinstance(node, ast.Call) else node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def writes_shared_state(tree, target) -> bool:
+    """True unless the function holding `target` provably writes only to its own locals and arguments' objects.
+
+    A function that stores into cls, a class name, a module level name or a global, mutates a container with such a root,
+    or is cached, may leave the changed value behind for later tests (Dialect._classes is filled this way). Anything not
+    inside a plain function (a lambda, a class body) counts as shared."""
+    parents = {}
+    for n in ast.walk(tree):
+        for c in ast.iter_child_nodes(n):
+            parents[id(c)] = n
+    fn = parents.get(id(target))
+    while fn is not None and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        fn = parents.get(id(fn))
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return True
+    module_names = set()
+    for n in tree.body:
+        if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            module_names.add(n.name)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                for e in ast.walk(t):
+                    if isinstance(e, ast.Name):
+                        module_names.add(e.id)
+    for d in fn.decorator_list:
+        text = ast.dump(d)
+        if "cache" in text.lower() or "cached" in text.lower():
+            return True
+
+    def shared(root):
+        return root is not None and (root == "cls" or root in module_names or root[:1].isupper())
+
+    for n in ast.walk(fn):
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            return True
+        targets = []
+        if isinstance(n, ast.Assign):
+            targets = n.targets
+        elif isinstance(n, (ast.AugAssign, ast.AnnAssign)):
+            targets = [n.target]
+        elif isinstance(n, ast.Delete):
+            targets = n.targets
+        for t in targets:
+            for e in ast.walk(t):
+                if isinstance(e, (ast.Attribute, ast.Subscript)) and isinstance(e.ctx, (ast.Store, ast.Del)) and shared(_root(e)):
+                    return True
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in _STORE_METHODS and shared(_root(n.func.value)):
+            return True
+    return False
+
+
 class Profile:
     """Compact weak-mutation profile of many tests (maps/weakmut.bin, format 3).
 
@@ -201,11 +261,17 @@ class Profile:
     def groups(self, path, key):
         return self.sites.get(path, {}).get(key, ())
 
-    def droppable_tests(self, path, key, kind, j) -> int:
+    def droppable_tests(self, path, key, kind, j, propagate=True) -> int:
+        """Recorded tests the mutation cannot affect. A test that evaluates the site with a different value keeps itself and
+        every test numbered after it (the suite runs in test number order in one process): the changed value may have been
+        written into process wide state (a registry, a cache) that a later test only reads."""
         keep = 0
         for mask, bits in self.groups(path, key):
             if not droppable(kind, j, mask):
                 keep |= bits
+        if keep and propagate:
+            first = (keep & -keep).bit_length() - 1
+            keep |= ~((1 << first) - 1)
         return self.recorded & ~keep
 
 
@@ -238,7 +304,8 @@ def drops(path, patch_changes, old_text, new_text, summaries, srcreaders=0):
     key = key_tuple(a, kind)
     out = set()
     if isinstance(summaries, Profile):
-        out = set(_bits_of(summaries.droppable_tests(path, key, kind, j) & ~srcreaders))
+        propagate = writes_shared_state(old_tree, a)
+        out = set(_bits_of(summaries.droppable_tests(path, key, kind, j, propagate) & ~srcreaders))
         return out, f"weakmut {path}:{a.lineno} {kind}{'' if j is None else ' -> ' + OPS[j].__name__}: dropped {len(out)} tests"
     for t, per in summaries.items():
         if (srcreaders >> t) & 1:

@@ -7,6 +7,7 @@ must be loaded, and its sites recorded, by every test that asks for it), with to
   WM_RES    directory for the per-test result files (one fresh directory per seed)
   WM_TESTS  path of tests.json (node id -> test number)
   WM_OUT    scratch directory for the recorder's event logs (per test sub directories are made inside)
+  WM_PRE    optional, harness D: node id prefixes of state-changing tests to run first in the parent (see pytest_collection_finish)
 
 Why fork: a test starts from the same state (the parent after collection), so a lazily cached
 value is computed, and its sites recorded, in every test that needs it, whatever order the workers run in.
@@ -61,6 +62,20 @@ def _collect(dirpath: str) -> dict:
         os.remove(p)
     os.rmdir(dirpath)
     return summ
+
+
+def pytest_collection_finish(session):
+    """Harness D: WM_PRE=<node id prefix>[,<prefix>...] names tests that change process wide state (tests/test_dialect_entry_points.py
+    clears Dialect._classes). They run here, in the parent and unrecorded, before any child is forked, so every
+    recorded test starts from the state the suite has after them, and runs (and records) the lazy code that rebuilds it."""
+    pre = [p for p in os.environ.get("WM_PRE", "").split(",") if p]
+    if not pre:
+        return
+    from _pytest.runner import runtestprotocol
+
+    for item in session.items:
+        if any(item.nodeid.startswith(p) for p in pre):
+            runtestprotocol(item, nextitem=None, log=False)
 
 
 class _Watch:

@@ -40,8 +40,18 @@ Lines in importtime.bin ran at import or collection time: their test set says wh
 Lines in unstable.bin had a different test set in two of the runs (lazy or cached state): treat their test set as a lower bound.
 Rebuild: bash tools/run_instrumented.sh instr <src> <dir> (FORK mode: MAPS_FORK=1 and -p tools.forkrun, see Makefile maps target), then python tools/build_maps.py build --run <dirs...>.
 
---- sequential coverage pass (T24) ---
-tools/run_seqcov.sh: the whole suite in ONE process, in collection order, -n 0, no fork, no preimport, PYTHONHASHSEED=0, with tools.covctx contexts.
-It was merged with tools/merge_seqcov.py into lines.bin, files.bin, classes.bin, names.bin, unstable.bin (sets.bin extended, committed set ids unchanged).
-Why: tests/test_dialect_entry_points.py clears Dialect._classes, so tests after it re-run Dialect._try_load's registration loop (dialect.py 248 to 257),
-which no forked or pre-imported run executes. 5124 lines gained tests; unstable lines 7234 to 11465 (lines whose test set differs between runs stay wide).
+--- sequential and post-clear coverage passes (T24) ---
+Two runs were added to the six original runs (run3 to run6, amd2, amd3) and merged with tools/merge_seqcov.py into lines.bin, files.bin, classes.bin,
+names.bin, unstable.bin (sets.bin extended, committed set ids unchanged):
+  tools/run_seqcov.sh   the whole suite in ONE process, in collection order, -n 0, no fork, no preimport, PYTHONHASHSEED=0, per-test contexts;
+  tools/run_forkpre.sh  fork per test (as the original fork runs) from a parent that first ran tests/test_dialect_entry_points.py.
+Why: that file clears Dialect._classes, so tests after it re-run Dialect._try_load's registration loop (dialect.py 248 to 257), which no
+forked or pre-imported run executes; and when the loop is mutated, every later test that needs a dialect fails, not only the first one.
+5126 lines gained tests; unstable lines 7234 to 11703 (lines whose test set differs between runs stay wide).
+
+--- weakmut.bin (T24) ---
+Format 3, recorder 3. Harnesses OR-merged, 5 seeds each for A (fork, whole suite collected first), B (one pytest per file) and C (whole suite in one process,
+in order, tools/wmseq.py), 2 seeds for D (fork from a parent that first ran tests/test_dialect_entry_points.py, WM_PRE). 2 tests (test_enum, starrocks
+test_time_slice_origin_roundtrip) fail in harness D, so they are not recorded and never drop.
+Rule (selector/weakmut.py Profile.droppable_tests): a function that writes shared state (cls, class name, module level name, global, cached) keeps every test
+numbered after the first test that sees a changed value, because test numbers are the one-process execution order.

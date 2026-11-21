@@ -29,6 +29,20 @@ def _read_all(fd: int) -> bytes:
     return b"".join(chunks)
 
 
+def pytest_collection_finish(session):
+    """MAPS_PRE=<node id prefix>[,<prefix>...]: tests that change process wide state (tests/test_dialect_entry_points.py clears
+    Dialect._classes) run first in the parent, unmeasured and unreported, so every forked test starts from the state the
+    suite has after them and executes (and is credited with) the lazy code that rebuilds it."""
+    pre = [p for p in os.environ.get("MAPS_PRE", "").split(",") if p]
+    if not pre:
+        return
+    from _pytest.runner import runtestprotocol
+
+    for item in session.items:
+        if any(item.nodeid.startswith(p) for p in pre):
+            runtestprotocol(item, nextitem=None, log=False)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_protocol(item, nextitem):
     from _pytest.runner import runtestprotocol

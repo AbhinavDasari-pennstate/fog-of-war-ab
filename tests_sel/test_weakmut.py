@@ -277,7 +277,7 @@ def test_a_mutation_a_giant_feels_keeps_the_giant(real):
 # ---- compact whole-suite profile (format 3) ---------------------------------------------------------
 
 def _profile_case():
-    old = "def f(x):\n    return x is None\n"
+    old = "def f(x):\n    G[x] = x is None\n"
     new = old.replace("is", "==")
     node = [n for n in ast.walk(ast.parse(old)) if isinstance(n, ast.Compare)][0]
     key = (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset, "C")
@@ -293,9 +293,9 @@ def test_profile_drops_match_the_dict_form_and_keep_unrecorded_tests():
         {p: {key: [(W.EVAL_BIT, 1 << 7), (W.EVAL_BIT | 1 << 4, 1 << 8), (W.EVAL_BIT | W.UNKNOWN_BIT, 1 << 11)]}},
     )
     got, _ = W.drops(p, None, old, new, prof)
-    assert got == {7, 9}  # 10 was never recorded: never dropped; 8 differs; 11 unknown
+    assert got == {7}  # 8 differs and so does everything after it (9, 11, and the unrecorded 10 never drops)
     got, _ = W.drops(p, None, old, new, prof, srcreaders=1 << 7)
-    assert got == {9}
+    assert got == set()
 
 
 def test_profile_never_drops_and_or_not_sites_that_ran():
@@ -303,10 +303,60 @@ def test_profile_never_drops_and_or_not_sites_that_ran():
     old, new = "def f(a, b):\n    return a and b\n", "def f(a, b):\n    return a or b\n"
     node = [n for n in ast.walk(ast.parse(old)) if isinstance(n, ast.BoolOp)][0]
     key = (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset, "B")
-    prof = W.Profile((1 << 3) | (1 << 4), {p: {key: [(W.EVAL_BIT, 1 << 3)]}})
+    prof = W.Profile((1 << 2) | (1 << 3) | (1 << 4), {p: {key: [(W.EVAL_BIT, 1 << 3)]}})
     got, _ = W.drops(p, None, old, new, prof)
-    assert got == {4}  # 3 ran the site; 4 never did
+    assert got == {2, 4}  # 3 ran the site; a pure function leaves nothing behind for the later test 4
 
 
 def test_empty_profile_is_false():
     assert not W.Profile(0, {})
+
+
+def test_a_changed_value_keeps_every_later_test_even_if_it_never_ran_the_site():
+    old, new, key = _profile_case()
+    p = "sqlglot/x.py"
+    prof = W.Profile(sum(1 << n for n in range(5, 12)), {p: {key: [(W.EVAL_BIT | 1 << 4, 1 << 8)]}})
+    got, _ = W.drops(p, None, old, new, prof)
+    assert got == {5, 6, 7}  # state written by test 8 (a registry, a cache) can fail 9, 10, 11 without their running the site
+    prof = W.Profile(sum(1 << n for n in range(5, 12)), {p: {key: [(W.EVAL_BIT, 1 << 8)]}})
+    got, _ = W.drops(p, None, old, new, prof)
+    assert got == set(range(5, 12))  # no test ever sees a different value: all drop
+
+
+# ---- which functions may leave a changed value behind for later tests -------------------------------
+
+@pytest.mark.parametrize("src,expect", [
+    ("def f(a, b):\n    return a < b\n", False),
+    ("def f(a, b):\n    out = []\n    out.append(a < b)\n    return out\n", False),
+    ("def f(a, b):\n    self.x = a < b\n", False),
+    ("class C:\n    @classmethod\n    def f(cls, a):\n        cls._reg[a] = a < 1\n", True),
+    ("_CACHE = {}\ndef f(a):\n    _CACHE[a] = a < 1\n", True),
+    ("_CACHE = {}\ndef f(a):\n    _CACHE.setdefault(a, a < 1)\n", True),
+    ("def f(a):\n    global G\n    G = a < 1\n", True),
+    ("import functools\n@functools.lru_cache()\ndef f(a):\n    return a < 1\n", True),
+    ("class Dialect:\n    pass\ndef f(a):\n    Dialect.x = a < 1\n", True),
+    ("g = lambda a: a < 1\n", True),
+    ("class C:\n    X = 1 < 2\n", True),
+])
+def test_writes_shared_state(src, expect):
+    tree = ast.parse(src)
+    node = [n for n in ast.walk(tree) if isinstance(n, ast.Compare)][0]
+    assert W.writes_shared_state(tree, node) is expect
+
+
+def test_profile_drops_propagate_only_through_functions_that_write_shared_state():
+    p = "sqlglot/x.py"
+    key_src = lambda body: ("def f(a, b):\n    " + body + "\n")  # noqa: E731
+    pure_old, pure_new = key_src("return a is None"), key_src("return a == None")
+    node = [n for n in ast.walk(ast.parse(pure_old)) if isinstance(n, ast.Compare)][0]
+    key = (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset, "C")
+    prof = W.Profile(sum(1 << n for n in range(5, 12)), {p: {key: [(W.EVAL_BIT | 1 << 4, 1 << 8)]}})
+    got, _ = W.drops(p, None, pure_old, pure_new, prof)
+    assert got == set(range(5, 12)) - {8}  # a pure function: later tests cannot see the changed value
+    reg_old = "def f(cls, a):\n    cls._r[a] = a is None\n"
+    reg_new = reg_old.replace("is", "==")
+    node = [n for n in ast.walk(ast.parse(reg_old)) if isinstance(n, ast.Compare)][0]
+    key = (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset, "C")
+    prof = W.Profile(sum(1 << n for n in range(5, 12)), {p: {key: [(W.EVAL_BIT | 1 << 4, 1 << 8)]}})
+    got, _ = W.drops(p, None, reg_old, reg_new, prof)
+    assert got == {5, 6, 7}

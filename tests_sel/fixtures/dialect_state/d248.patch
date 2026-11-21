@@ -1,0 +1,13 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index fed01b2..dd22fd6 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -245,7 +245,7 @@ class _Dialect(type):
+             module = importlib.import_module(f"sqlglot.dialects.{key}")
+             # If module was already imported, the class may not be in _classes
+             # Find and register the dialect class from the module
+-            if key not in cls._classes:
++            if key in cls._classes:
+                 for attr_name in dir(module):
+                     attr = getattr(module, attr_name, None)
+                     if (

@@ -67,6 +67,8 @@ def main():
     ap.add_argument("--res-b", nargs="+", default=[], help="seed directories of the second harness (tools/wm_perfile.sh); a site's "
                     "mask is the OR over both harnesses, and a test needs a result in every directory of both")
     ap.add_argument("--res-c", nargs="+", default=[], help="seed directories of harness C (tools/wmseq_seeds.sh): whole suite in one process, in order")
+    ap.add_argument("--res-d", nargs="+", default=[], help="seed directories of harness D (tools/wm_seeds.sh with WM_PRE set): "
+                    "fork per test from a parent that first ran the state-clearing tests")
     ap.add_argument("--old")
     ap.add_argument("--min-seeds", type=int, default=3)
     ap.add_argument("--out", default=os.path.join(ROOT, "maps", "weakmut.bin"))
@@ -81,7 +83,7 @@ def main():
             old = d["tests"]
     recorded, ids, groups = 0, {}, {}
     n_fork = n_old = n_unrec = unstable_total = 0
-    harnesses = [d for d in (a.res, a.res_b, a.res_c) if d]
+    harnesses = [d for d in (a.res, a.res_b, a.res_c, a.res_d) if d]
     for n in sorted(tests):
         parts = [load_test(n, tests[n], d) for d in harnesses]
         have = [p for p in parts if p is not None]
