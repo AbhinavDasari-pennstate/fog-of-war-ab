@@ -82,3 +82,36 @@ def test_damaged_map_widens_to_every_test(env):
     ctx = rules.Ctx(maps, tests, PIN)
     ctx.m = Damaged()
     assert ctx.imptime("sqlglot/tokens.py", "Tokenizer") == ctx.all
+
+
+def test_edit_that_makes_the_edited_module_raise_while_it_imports_selects_its_lazy_importers(env):
+    """generators/duckdb.py parses ZIPF_TEMPLATE in its class body: a broken template makes the import raise, and
+    test_time.py imports that module only through the dialect registry."""
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/generators/duckdb.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace("SELECT :random_expr AS r),", "SELECT :random_expr AS r FROM FROM),", 1)
+    assert new != old
+    got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    assert {t["id"]: t["number"] for t in tests}[LAZY] in got
+
+
+def test_number_or_bool_constant_inside_a_call_in_a_class_body_does_not_widen(env):
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/parsers/singlestore.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace('_show_parser("GROUPS FOR USER", target=True)', '_show_parser("GROUPS FOR USER", target=False)', 1)
+    assert new != old
+    got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    assert len(got) < 200
+
+
+def test_string_constant_inside_a_call_in_a_class_body_widens_to_the_importers(env):
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/parsers/singlestore.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace('_show_parser("GROUPS FOR USER", target=True)', '_show_parser("GROUPS FOR USER ", target=True)', 1)
+    assert new != old
+    got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    imp = maps.imports[rel]
+    assert len(got) >= len([n for n in range(len(tests)) if (imp >> n) & 1])

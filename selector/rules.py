@@ -201,6 +201,90 @@ def _doc_only(old_tree, diffs) -> bool:
     return bool(diffs) and all(id(n) in strs for n, _ in diffs)
 
 
+def _scope_stmts(node, path=()):
+    """Every statement outside function bodies, with the path ((attr, index) steps from the module) that reaches it. A def is a leaf."""
+    for fld in ("body", "orelse", "finalbody"):
+        sub = getattr(node, fld, None)
+        if not (isinstance(sub, list) and sub and isinstance(sub[0], ast.stmt)):
+            continue
+        for i, st in enumerate(sub):
+            here = path + ((fld, i),)
+            yield st, here
+            if not isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                yield from _scope_stmts(st, here)
+    for hi, h in enumerate(getattr(node, "handlers", ()) or ()):
+        yield from _scope_stmts(h, path + (("handlers", hi),))
+
+
+def _counterpart(tree, path):
+    """The statement at `path` (see _scope_stmts) in another parse, or None when the shapes differ."""
+    node = tree
+    for fld, i in path:
+        try:
+            node = getattr(node, fld)[i]
+        except (AttributeError, IndexError, TypeError):
+            return None
+    return node
+
+
+class _Blank(ast.NodeTransformer):
+    def visit_Constant(self, node):
+        if isinstance(node.value, (str, bytes)):
+            return node
+        return ast.copy_location(ast.Constant(value=0), node)
+
+
+def _same_but_numbers(a, b) -> bool:
+    """The two statements agree except for bool, number and None constants (strings, names and calls are equal)."""
+    import copy
+
+    return ast.dump(_Blank().visit(copy.deepcopy(a))) == ast.dump(_Blank().visit(copy.deepcopy(b)))
+
+
+def _own_import_risk(old_tree, new_tree, old_text: str, diffs, ranges) -> bool:
+    """True when an edit outside function bodies can change whether the edited module imports at all: the statement that holds it
+    is not a plain assignment of a literal that cannot raise (a call such as exp.maybe_parse(...) at class level parses at import,
+    `1 / 0` or a name that does not exist raises). Edits inside lambda bodies and docstrings do not run at import. A def or a decorator
+    is the business of the import-time line sets (_func_level, the d0 rule). Any doubt is True."""
+    stmts = list(_scope_stmts(old_tree))
+    for node, deferred in diffs:
+        if deferred is not None:
+            continue
+        lo = getattr(node, "lineno", None)
+        if lo is None:  # a node without a position (a comprehension clause, an argument list): the edited lines decide
+            if not ranges:
+                return True
+            lo, hi = min(a for a, _ in ranges), max(b for _, b in ranges)
+        else:
+            hi = getattr(node, "end_lineno", lo) or lo
+        best = None
+        for st, p in stmts:
+            a = min([st.lineno] + [d.lineno for d in getattr(st, "decorator_list", ())])
+            b = st.end_lineno or st.lineno
+            if a <= hi and lo <= b and (best is None or b - a <= best[3] - best[2]):
+                best = (st, p, a, b)
+        if best is None:
+            return True
+        st = best[0]
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) and isinstance(st.value.value, str):
+            continue
+        other = _counterpart(new_tree, best[1])
+        if other is not None and type(other) is type(st) and _same_but_numbers(st, other):
+            continue  # only bool, number or None constants differ: an argument of a call cannot make a plain constant raise
+        if isinstance(st, (ast.Assign, ast.AnnAssign)) and st.value is not None:
+            if not attrrule.simple_value(st.value, old_text):
+                return True
+            if other is None or type(other) is not type(st) or other.value is None:
+                return True
+            if not attrrule.simple_value(other.value, old_text) or not attrrule.literal_ok(other.value):
+                return True
+            continue
+        return True
+    return False
+
+
 def _is_enum(old_lines, start: int, cls: str) -> bool:
     """True when the class holding the statement at `start` has an enum base."""
     simple = cls.rsplit(".", 1)[-1]
@@ -513,6 +597,8 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
 
     is_test = path.startswith("tests/") and os.path.basename(path).startswith("test_")
     out = _py_lines(ctx, path, change, old_text.split("\n"), is_test, soft) | sr
+    if path.startswith("sqlglot/") and _own_import_risk(old_tree, new_tree, old_text, diffs, ranges):
+        out |= ctx.wide(path)  # the edit can make this very module raise while it imports: every test that imports it, lazily or not
     # A change of what a function binds or resolves (a name made local, a yield, a global, a closure) acts on every
     # line of that function, not only on the line edited: every test that ran any of its lines.
     try:
