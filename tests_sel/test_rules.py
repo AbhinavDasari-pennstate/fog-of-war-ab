@@ -91,10 +91,17 @@ def test_r7_class_constant_includes_test_simplify(rules, maps, tests):
     assert num(tests, "TestOptimizer::test_simplify") in got
 
 
-@pytest.mark.parametrize("cid", ["4d63", "ktz3", "gbav"])
-def test_r7_import_time_lines_select_something(rules, maps, tests, cid):
-    got, _ = run_sample(rules, maps, tests, cid)
+def test_r7_import_time_lines_select_something(rules, maps, tests):
+    got, _ = run_sample(rules, maps, tests, "gbav")
     assert got
+
+
+@pytest.mark.parametrize("cid", ["4d63", "ktz3"])
+def test_v_rule_empties_dict_entry_constants_nobody_reads(rules, maps, tests, cid):
+    # 4d63: NUMERIC_ESCAPES "u" of Snowflake's tokenizer; ktz3: TriggerProperties.arg_types["constraint"] False -> True.
+    # maps/valreads.bin says no test reads that entry value (or validated an instance missing the key); both are labelled harmless.
+    got, why = run_sample(rules, maps, tests, cid)
+    assert got == set() and "V " in why
 
 
 def test_r2_fixture_selects_its_test(rules, maps, tests):
