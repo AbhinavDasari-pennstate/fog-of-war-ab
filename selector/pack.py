@@ -1,7 +1,11 @@
 """Deterministic worker packing in integer milliseconds."""
 
+import time
+
 WORKER_COST_MS = 2000
 MAX_WORKERS = 8
+EXACT_NODE_LIMIT = 20_000
+EXACT_CPU_SECONDS = 0.020
 
 
 def _lpt(order: list[tuple[int, int]], k: int) -> tuple[list[list[int]], int]:
@@ -56,16 +60,17 @@ def _improve(workers, durations, lower):
     return workers, max(loads)
 
 
-def _exact(order, workers, bound, lower):
-    """Search all distinct load assignments until the lower bound is met."""
+def _exact(order, workers, bound, lower, budget):
+    """Search distinct load assignments until the lower bound or budget is met."""
     k = len(workers)
     loads = [0] * k
     current = [[] for _ in range(k)]
     best = [bound, [w[:] for w in workers]]
 
     def visit(i):
-        if best[0] == lower:
+        if best[0] == lower or budget[0] <= 0 or time.process_time() >= budget[1]:
             return
+        budget[0] -= 1
         if i == len(order):
             best[0] = max(loads)
             best[1] = [w[:] for w in current]
@@ -82,7 +87,7 @@ def _exact(order, workers, bound, lower):
             visit(i + 1)
             current[j].pop()
             loads[j] = load
-            if best[0] == lower:
+            if best[0] == lower or budget[0] <= 0 or time.process_time() >= budget[1]:
                 return
 
     visit(0)
@@ -97,6 +102,7 @@ def pack(tests: dict[int, int]) -> list[list[int]]:
     total = sum(tests.values())
     best_cost = float('inf')
     best_workers = []
+    budget = [EXACT_NODE_LIMIT, time.process_time() + EXACT_CPU_SECONDS]
     for k in range(1, min(MAX_WORKERS, len(order)) + 1):
         if WORKER_COST_MS * k >= best_cost:
             break
@@ -105,10 +111,9 @@ def pack(tests: dict[int, int]) -> list[list[int]]:
             continue
         workers, makespan = _lpt(order, k)
         if makespan > lower:
+            workers, makespan = _improve(workers, tests, lower)
             if len(order) <= 25:
-                workers, makespan = _exact(order, workers, makespan, lower)
-            else:
-                workers, makespan = _improve(workers, tests, lower)
+                workers, makespan = _exact(order, workers, makespan, lower, budget)
         cost = makespan + WORKER_COST_MS * k
         if cost < best_cost:
             best_cost, best_workers = cost, workers

@@ -70,3 +70,37 @@ def test_full_sample_cost_and_speed():
 def test_lpt_counterexample():
     tests = {0: 8095, 1: 4318, 2: 5823, 3: 14628, 4: 5407, 5: 1151, 6: 1542, 7: 3455}
     assert cost(pack.pack(tests), tests) == oracle(tests)
+
+
+def assert_fast_and_at_least_local(tests):
+    start = time.process_time()
+    workers = pack.pack(tests)
+    elapsed = time.process_time() - start
+    assert sorted(n for w in workers for n in w) == sorted(tests)
+    order = sorted(tests.items(), key=lambda kv: (-kv[1], kv[0]))
+    total = sum(tests.values())
+    baseline = float('inf')
+    for k in range(1, min(pack.MAX_WORKERS, len(tests)) + 1):
+        lower = max(order[0][1], (total + k - 1) // k)
+        initial, makespan = pack._lpt(order, k)
+        if makespan > lower:
+            initial, makespan = pack._improve(initial, tests, lower)
+        baseline = min(baseline, makespan + pack.WORKER_COST_MS * k)
+    assert cost(workers, tests) <= baseline
+    assert elapsed < 0.050, f'{elapsed * 1000:.2f} ms CPU'
+
+
+def test_real_durations_search_budget():
+    path = Path('/Users/vidyutsriram/hackathons/builders-buildathon-2026/kits/rwx/x/sample/tests.json')
+    data = json.loads(path.read_text())['tests']
+    eligible = [t for t in data if 200 <= round(t['seconds'] * 1000) <= 6686]
+    sample = random.Random(120).sample(eligible, 24)
+    tests = {t['number']: round(t['seconds'] * 1000) for t in sample}
+    assert_fast_and_at_least_local(tests)
+
+
+@pytest.mark.parametrize('seed', range(12))
+def test_synthetic_search_budget(seed):
+    rng = random.Random(seed)
+    tests = {i: rng.randint(1500, 15000) for i in range(20 + seed % 6)}
+    assert_fast_and_at_least_local(tests)
