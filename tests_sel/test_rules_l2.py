@@ -74,3 +74,22 @@ def test_derived_table_marks_class_creation_reads():
     assert "Generator" in d["derived"]["sqlglot.dialects.duckdb:DuckDB"]
     assert "KEYWORDS" in d["derived"]["sqlglot.dialects.mysql:MySQL.Tokenizer"]
     assert "sqlglot.dialects.dialect:NormalizationStrategy" in d["enums"]
+
+
+@pytest.mark.parametrize("rel,old_s,new_s", [
+    # reviewer m1: STRING_TYPE_MAPPING flows into TYPE_MAPPING as a bare name inside the class body
+    ("sqlglot/generators/exasol.py", '        exp.DType.TEXT: "LONG VARCHAR",\n', '        exp.DType.TEXT: "VARCHAR",\n'),
+    # m19 and m21: NAME_TO_PROPERTY is inverted by a comprehension in the class body
+    ("sqlglot/expressions/properties.py", '        "PARTITIONED_BY": PartitionedByProperty,\n', '        "PARTITION_BY": PartitionedByProperty,\n'),
+    ("sqlglot/expressions/properties.py", '        "LOCK": LockProperty,\n', '        "LOCKS": LockProperty,\n'),
+])
+def test_bare_name_derivations_keep_today_s_rule(env, rel, old_s, new_s):
+    got, why, num = select(env, rel, old_s, new_s)
+    assert "L2" not in why
+    assert num["tests/dialects/test_exasol.py::TestExasol::test_type_mappings"] in got or "properties" in rel
+    assert len(got) > 20
+
+
+def test_unhashable_set_member_value_keeps_today_s_rule(env):
+    got, why, num = select(env, "sqlglot/dialects/mysql.py", "    SAFE_DIVISION = True\n", "    SAFE_DIVISION = {[]}\n")
+    assert "L2" not in why

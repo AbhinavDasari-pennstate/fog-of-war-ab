@@ -72,3 +72,27 @@ def test_bases_change_does_not_qualify():
 def test_module_of():
     assert attrrule.module_of("sqlglot/dialects/mysql.py") == "sqlglot.dialects.mysql"
     assert attrrule.module_of("sqlglot/dialects/__init__.py") == "sqlglot.dialects"
+
+
+def test_bare_name_use_in_the_class_body_does_not_qualify():
+    # the value flows into another statement at class creation (reviewer m1, m19, m21)
+    old = "class A:\n    BASE = {'a': 1}\n    FULL = {**BASE, 'b': 2}\n"
+    assert run(old, old.replace("'a': 1", "'a': 2")) is None
+    old = "class A:\n    N = {'a': 'x'}\n    INV = {v: k for k, v in N.items()}\n"
+    assert run(old, old.replace("'x'", "'y'")) is None
+    old = "class A:\n    N = 1\n    def f(self, x=N):\n        pass\n"
+    assert run(old, old.replace("N = 1", "N = 2")) is None
+    old = "class A:\n    N = 1\n    if N:\n        M = 2\n"
+    assert run(old, old.replace("N = 1", "N = 0")) is None
+
+
+def test_own_name_inside_its_own_value_is_not_a_bare_use():
+    old = "class A:\n    N = {'a': 1}\n    M = 3\n"
+    assert run(old, old.replace("'a': 1", "'a': 2")) is not None
+
+
+def test_value_that_raises_at_import_does_not_qualify():
+    assert run(OLD, OLD.replace("SAFE = True", "SAFE = {[]}")) is None
+    assert run(OLD, OLD.replace("SAFE = True", "SAFE = {[1]: 2}")) is None
+    assert run(OLD, OLD.replace("SAFE = True", "SAFE = {1, 2}")) is not None
+    assert run(OLD, OLD.replace("NAMES = {\"a\": 1}", "NAMES = {**Dialect.X, \"a\": 2}")) is None  # Dialect.X not in old text

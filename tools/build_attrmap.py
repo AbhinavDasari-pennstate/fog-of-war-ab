@@ -44,11 +44,49 @@ def read_run(d, num):
     xml = os.path.join(d, "junit.xml")
     if os.path.exists(xml):
         for tc in ET.parse(xml).getroot().iter("testcase"):
-            if tc.find("failure") is not None or tc.find("error") is not None:
-                cls = tc.get("classname", "").replace(".", "/")
-                # classname is a dotted module path plus class: match on the name part when possible
-                bad.add((tc.get("classname"), tc.get("name")))
+            if tc.find("failure") is None and tc.find("error") is None:
+                continue
+            parts = (tc.get("classname") or "").split(".")
+            for i in range(len(parts), 0, -1):
+                tid = "/".join(parts[:i]) + ".py::" + "::".join(parts[i:] + [tc.get("name")])
+                if tid in num:
+                    bad.add(num[tid])
+                    break
+            else:
+                raise SystemExit(f"failed test {tc.get('classname')}::{tc.get('name')} not found in the map ids: refusing to build")
     return derived, per, seen_tests, bad
+
+
+def bare_derived(src):
+    """Class-level names that another statement of the same class loads as a bare name: their value flows into
+    something built while the class body runs (derived tables, comprehensions, defaults)."""
+    import ast
+
+    sys.path.insert(0, os.path.join(ROOT, "selector"))
+    import attrrule
+
+    out = set()
+
+    def visit(body, stack, mod):
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                st = stack + [node.name]
+                for stmt in node.body:
+                    name = None
+                    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                        name = stmt.targets[0].id
+                    elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
+                        name = stmt.target.id
+                    if name and attrrule.bare_use(node, stmt, name):
+                        out.add((f"{mod}:{'.'.join(st)}", name))
+                visit(node.body, st, mod)
+
+    for dp, dn, fn in os.walk(os.path.join(src, "sqlglot")):
+        for f in fn:
+            if f.endswith(".py"):
+                p = os.path.join(dp, f)
+                visit(ast.parse(open(p, "rb").read(), p).body, [], attrrule.module_of(os.path.relpath(p, src)))
+    return out
 
 
 def enum_classes(src):
@@ -88,7 +126,8 @@ def main():
     num = {t: n for n, t in enumerate(m.ids) if t is not None}
     runs = [read_run(d, num) for d in a.run]
     names = json.load(open(os.path.join(a.run[0], "names.json")))
-    derived = set()
+    derived = bare_derived(os.path.realpath(a.src))
+    static_n = len(derived)
     keys = set()
     for dv, per, _, _ in runs:
         derived |= dv
@@ -105,12 +144,14 @@ def main():
         reads[k] = u
     allnum = {n for n, t in enumerate(m.ids) if t is not None}
     unrec = set()
-    for _, _, seen, _ in runs:
+    failed = set()
+    for _, _, seen, bad in runs:
         unrec |= allnum - seen
+        failed |= bad
     # tests that read no attribute of a sqlglot class by design (pure helpers, the C build tests, which the
     # srcreaders map covers) need no entry; any other test with no recording is always added by the selector
     pure = ("tests/test_errors.py", "tests/test_helper.py", "tests/test_time.py", "tests/test_sqlglotc.py")
-    unrec = {n for n in unrec if not m.ids[n].startswith(pure)}
+    unrec = {n for n in unrec if not m.ids[n].startswith(pure)} | failed  # a test that failed while recorded proves nothing
     sets, sid = [0], {0: 0}
     table = {}
     for (q, n), mask in reads.items():
@@ -135,7 +176,7 @@ def main():
     with open(a.out, "wb") as f:
         f.write(zlib.compress(marshal.dumps(out), 9))
     print(f"pairs {len(reads)} derived {len(derived)} differ-between-runs {differ} sets {len(sets)} "
-          f"unrecorded tests {len(unrec)} enums {len(out['enums'])} bytes {os.path.getsize(a.out)}")
+          f"static bare-name derived {static_n} failed-while-recording {len(failed)} unrecorded tests {len(unrec)} enums {len(out['enums'])} bytes {os.path.getsize(a.out)}")
 
 
 if __name__ == "__main__":
