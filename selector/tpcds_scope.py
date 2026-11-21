@@ -59,6 +59,8 @@ class TpcdsMap:
         self.unstable = set(raw["unstable"])
 
     table_cpu: dict = {}
+    lambda_called = None  # {"path:line"} of lambdas called outside a query (maps/tpcds_lambdas.json); None = unknown
+    lambda_q: dict = {}  # "path:line" -> {query: {stages}} of lambdas called inside a query
 
     @classmethod
     def load(cls, path) -> "TpcdsMap":
@@ -71,6 +73,17 @@ class TpcdsMap:
                 m.table_cpu = json.load(f)
         except OSError:
             pass
+        try:
+            with open(os.path.join(os.path.dirname(path), "tpcds_lambdas.json")) as f:
+                lam = json.load(f)
+            m.lambda_called = set(lam["called"])
+            m.lambda_q = {}
+            for q, stages in lam["q"].items():
+                for st, keys in stages.items():
+                    for k in keys:
+                        m.lambda_q.setdefault(k, {}).setdefault(int(q), set()).add(st)
+        except (OSError, ValueError, KeyError):
+            m.lambda_called = None
         return m
 
     FIXED_S = 0.30  # interpreter, map, import of every module, fixture parse, one fork
@@ -95,13 +108,14 @@ class TpcdsMap:
         return total + sum(self.table_cpu.get(t, 0.05) for t in need)
 
 def _units(tree):
-    """Outermost function defs, in source order, keyed (qualified name, ordinal)."""
+    """Outermost function defs, and the lambdas that sit outside every function (a table in a class
+    body or at module level), in source order, keyed (qualified name, ordinal)."""
     out, counts = [], {}
 
     def walk(node, prefix):
         for ch in ast.iter_child_nodes(node):
-            if isinstance(ch, _FUNC):
-                q = prefix + ch.name
+            if isinstance(ch, _FUNC + (ast.Lambda,)):
+                q = prefix + (ch.name if isinstance(ch, _FUNC) else "<lambda>")
                 k = counts.get(q, 0)
                 counts[q] = k + 1
                 out.append(((q, k), ch))
@@ -123,7 +137,13 @@ def _shell_and_units(tree):
     units = _units(tree)
     dumps = {key: (ast.dump(node), _bind_sig(node)) for key, node in units}
     for _, node in units:
-        node.body = [ast.Pass()]
+        if isinstance(node, ast.Lambda):
+            node.body = ast.Constant(value=None)  # the body runs only when the lambda is called
+        else:
+            node.body = [ast.Pass()]
+            # a literal default is read only by a call that leaves the parameter out, and that call runs the body
+            for lst, i in pyscope._slots(node):
+                lst[i] = ast.Constant(value=0)
     return dumps, ast.dump(tree)
 
 
@@ -207,8 +227,35 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
     blocks = _blocks(change)
     plan: dict[int, set] = {}
     notes = []
+    def reach(ls):
+        m4 = [0] * 5
+        for ln in ls:
+            for si, v in enumerate(cov.get(ln, (0,) * 5)):
+                m4[si] |= v
+        return m4
+
+    def add(ms):
+        for si, v in enumerate(ms):
+            q = 0
+            while v:
+                if v & 1:
+                    plan.setdefault(q, set()).add(STAGES[si])
+                v >>= 1
+                q += 1
+
     for key in changed:
         node = nodes[key]
+        if isinstance(node, ast.Lambda):
+            # A lambda in a table runs only when called. The per-query LINE coverage cannot see a one-line
+            # lambda, so the calls are recorded by tools/tpcds_lambdas.py (per query and stage, plus the
+            # calls outside any query: those make an edit an import-time edit).
+            lk = f"{path}:{node.lineno}"
+            if tp.lambda_called is None or lk in tp.lambda_called:
+                return None, f"{path}:{key[0]}: import-time edit (a lambda called at import or in setUpClass, or not recorded)"
+            for q, sts in tp.lambda_q.get(lk, {}).items():
+                plan.setdefault(q, set()).update(sts)
+            notes.append(f"{key[0]} lambda {len(tp.lambda_q.get(lk, {}))}q")
+            continue
         span_lo = min([node.lineno] + [d.lineno for d in node.decorator_list])
         span_hi = node.end_lineno
         body_lo = node.body[0].lineno
@@ -238,13 +285,6 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
             narrow = False
         whole = set(range(body_lo, span_hi + 1))
 
-        def reach(ls):
-            m4 = [0] * 5
-            for ln in ls:
-                for si, v in enumerate(cov.get(ln, (0,) * 5)):
-                    m4[si] |= v
-            return m4
-
         if not narrow:
             lines = whole
         ms = reach(lines)
@@ -254,13 +294,7 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
             ms = reach(lines)
         if lines & base:
             return None, f"{path}:{key[0]}: import-time edit (the changed code also runs at import or in setUpClass)"
-        for si, v in enumerate(ms):
-            q = 0
-            while v:
-                if v & 1:
-                    plan.setdefault(q, set()).add(STAGES[si])
-                v >>= 1
-                q += 1
+        add(ms)
         notes.append(f"{key[0]} {'stmt' if narrow else 'func'} {'/'.join(str(bin(v).count('1')) for v in ms)}q")
     return plan, f"{path}: " + ", ".join(notes)
 

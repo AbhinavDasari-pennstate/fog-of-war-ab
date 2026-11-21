@@ -78,6 +78,18 @@ MUTANTS = {
         "    result = PythonExecutor(tables=tables_).execute(plan)\n    for _t in tables_.mapping.values():\n        _t.rows.append(_t.rows[0])\n",
         True, "cross-query state: the query itself is right, the shared table grows for the next one",
     ),
+    "default_literal": (
+        "sqlglot/optimizer/qualify.py",
+        "    expand_stars: bool = True,\n",
+        "    expand_stars: bool = False,\n",
+        True, "a literal default of qualify(): read by every call that leaves it out (T25)",
+    ),
+    "default_unused": (
+        "sqlglot/parsers/athena.py",
+        "        max_nodes: int = -1,\n",
+        "        max_nodes: int = 0,\n",
+        False, "a literal default of a method no TPC-DS query calls (T25)",
+    ),
     "classlevel": (
         "sqlglot/generators/python.py",
         "        exp.And: lambda self, e: f\"AND(lambda: {self.sql(e.left)}, lambda: {self.sql(e.right)})\",\n",

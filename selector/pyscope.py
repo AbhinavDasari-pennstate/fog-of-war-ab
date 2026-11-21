@@ -196,6 +196,62 @@ def units(tree):
     return out
 
 
+# ---- default-value-only edits ------------------------------------------------------------------
+
+def _literal(n) -> bool:
+    """A constant default: 1, "x", None, -1 (a literal evaluates at def time with no side effect)."""
+    if isinstance(n, ast.Constant):
+        return True
+    return (isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.USub, ast.UAdd))
+            and isinstance(n.operand, ast.Constant) and isinstance(n.operand.value, (int, float)))
+
+
+def _slots(fn):
+    """(list, index) of every literal default of a def (positional and keyword-only)."""
+    out = []
+    for lst in (fn.args.defaults, fn.args.kw_defaults):
+        for i, d in enumerate(lst):
+            if d is not None and _literal(d):
+                out.append((lst, i))
+    return out
+
+
+def _dumps(nodes):
+    return [None if n is None else ast.dump(n) for n in nodes]
+
+
+def default_only(old_tree, new_tree):
+    """The old def nodes whose literal default values changed, when that is the ONLY difference between
+    the two files (every other node, in order, is identical, including the number and place of defaults).
+    None when the trees differ in anything else, or no default value changed. The trees are left as found.
+
+    Why it matters: a literal default is evaluated when the def runs and read only when a call leaves the
+    parameter out, so a test depends on the edit only if it calls the function (runs a line of its body)."""
+    fo = [n for n in ast.walk(old_tree) if isinstance(n, _FUNCS)]
+    fn = [n for n in ast.walk(new_tree) if isinstance(n, _FUNCS)]
+    if len(fo) != len(fn):
+        return None
+    changed = []
+    for a, b in zip(fo, fn):
+        if _dumps(a.args.defaults + a.args.kw_defaults) != _dumps(b.args.defaults + b.args.kw_defaults):
+            changed.append(a)
+    if not changed:
+        return None
+    saved = []
+    marker = ast.Constant(value=0)
+    try:
+        for tree_fns in (fo, fn):
+            for f in tree_fns:
+                for lst, i in _slots(f):
+                    saved.append((lst, i, lst[i]))
+                    lst[i] = marker
+        same = ast.dump(old_tree) == ast.dump(new_tree)
+    finally:
+        for lst, i, d in reversed(saved):
+            lst[i] = d
+    return changed if same else None
+
+
 def rebound_spans(old_tree, new_tree) -> list:
     """Old-file line spans (lo, hi) of functions whose binding set changed."""
     new = {k: bind_sig(n) for k, n in units(new_tree)}

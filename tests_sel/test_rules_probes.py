@@ -199,3 +199,32 @@ def test_scope_hazards_unit():
     assert pyscope.scope_hazards(base, base.replace("rows = 1", "yield 1")) != []  # generator
     assert pyscope.scope_hazards(base, base.replace("rows = 1", "tmp = 1")) != []  # rows no longer bound: global lookup
     assert pyscope.scope_hazards(base, base.replace("rows = 1", "rows = 1\n        extra = 2")) == []  # brand-new name
+
+
+def test_literal_default_edit_selects_callers_of_the_body_not_importers_of_the_module(env):
+    """T25: AthenaParser.parse(max_nodes=-1 -> 0). The signature line runs at import for every test that imports
+    the module (and the maps credit lazily imported lines to whoever imported first), but a default is read only
+    by a call, and the call runs the body. The giants (test_parser test_max_nodes, test_execute_tpcds) never call
+    AthenaParser.parse; test_athena does."""
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/parsers/athena.py"
+    old = (PIN / rel).read_text("utf-8")
+    assert old.count("        max_nodes: int = -1,\n") == 1
+    new = old.replace("        max_nodes: int = -1,\n", "        max_nodes: int = 0,\n")
+    got, why = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    ids = {t["id"]: t["number"] for t in tests}
+    assert "literal default values only" in why
+    assert ids["tests/dialects/test_athena.py::TestAthena::test_ddl"] in got
+    for giant in ("tests/test_parser.py::TestParser::test_max_nodes", "tests/test_executor.py::TestExecutor::test_execute_tpcds"):
+        if giant in ids:
+            assert ids[giant] not in got, giant
+
+
+def test_default_edit_plus_a_body_edit_is_not_narrowed(env):
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/parsers/athena.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace("        max_nodes: int = -1,\n", "        max_nodes: int = 0,\n").replace("raw_tokens[1:], sql)", "raw_tokens[0:], sql)", 1)
+    assert new != old
+    _, why = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    assert "literal default values only" not in why

@@ -7,6 +7,7 @@ tests.json. src_root: the pinned sqlglot checkout (old file text). Any doubt wid
 Stdlib only, never imports sqlglot.
 """
 
+import ast
 import bisect
 import os
 import re
@@ -320,6 +321,33 @@ def _data_file(ctx: Ctx, path: str, change) -> tuple[int, str]:
     return out, f"{'R2' if path.startswith('tests/') else 'R1'} {path}"
 
 
+def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree):
+    """Tests that depend on an edit that only changes literal default values of defs, or None when the
+    edit is anything else (or the evidence is thin). A literal default is read only when a call leaves
+    the parameter out, and the call then runs the body: the tests are those that ran a line of a
+    changed def's body. The header lines (decorators, signature) run at import for every importer and
+    say nothing about who calls. Nothing in sqlglot or its tests reads defaults by introspection
+    (inspect.getfullargspec(rule).args and inspect.signature(func).parameters read names only).
+    A body line that ran at import widens to every importer, as for any def; a def whose body no test ran
+    keeps the older, wider rule."""
+    if not diffs or not all(d is None and isinstance(n, (ast.Constant, ast.UnaryOp, ast.arguments)) for n, d in diffs):
+        return None
+    fns = pyscope.default_only(old_tree, new_tree)
+    if not fns:
+        return None
+    il = ctx.m.importtime.get(path, ())
+    out = 0
+    for fn in fns:
+        lo, hi = fn.body[0].lineno, fn.end_lineno
+        u = ctx.udef(path, lo, hi)
+        if not u:
+            return None
+        out |= u
+        if any(ln in il for ln in range(lo, hi + 1)):
+            out |= ctx.wide(path)
+    return out
+
+
 def _one(ctx: Ctx, change) -> tuple[int, str]:
     m = ctx.m
     path = change.path_new
@@ -362,6 +390,9 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
         return sr, f"R4 {path}: ast unchanged" + (" (source readers)" if sr else "")
     if not pyscope.compiles(new_tree, path):
         return ctx.wide(path) | sr, f"R3 {path}: does not compile"
+    got = _defaults_only(ctx, path, diffs, old_tree, new_tree)
+    if got is not None:
+        return got | sr, f"R6/R7 {path}: literal default values only"
     ctx.narrow = None
     if ctx.single and path.startswith("sqlglot/"):
         try:

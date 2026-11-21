@@ -104,8 +104,10 @@ def test_class_constant_edit_replays_every_query_and_passes_when_harmless(tmp_pa
 
 
 def test_class_table_edit_that_breaks_queries_is_caught_by_the_replay(tmp_path):
+    """T25: the edit sits in a lambda of the Python generator's table. The recorded calls (maps/tpcds_lambdas.json)
+    name the queries that call it, so the replay runs those and still sees the broken result."""
     n, same, why = _replay_verdict("classlevel", tmp_path)
-    assert n == 99 and not same, why
+    assert 0 < n <= 99 and not same, why
 
 
 def test_optimizer_only_noop_edit_replays_stage_o_only_and_passes(tmp_path):
@@ -165,3 +167,39 @@ def test_replay_child_honours_the_hash_seed(tmp_path):
     patched = {c.path_new: diffparse.apply((PIN / c.path_new).read_bytes().decode("utf-8"), c) for c in changes}
     verdicts = [sel._run_replay(sc.plan, patched, PIN, 120, 0)[0] for _ in range(4)]
     assert verdicts == [False] * 4, verdicts
+
+
+def test_default_of_a_method_no_query_calls_drops_giant(tmp_path, capsys):
+    """T25: a literal default is read only by a call that runs the body; AthenaParser.parse is never called here."""
+    got = _run(tmp_path, {"c": M.patch_text(str(PIN), "default_unused")}, capsys)
+    assert got["c"] is False
+
+
+def test_default_of_a_function_every_query_calls_keeps_giant(tmp_path, capsys):
+    got = _run(tmp_path, {"c": M.patch_text(str(PIN), "default_literal")}, capsys)
+    assert got["c"] is True
+
+
+def test_lambda_no_query_calls_drops_giant(tmp_path, capsys):
+    """T25: a lambda in the Hive typing table, called by no query and not at import: nothing to replay."""
+    f = "sqlglot/typing/hive.py"
+    text = (PIN / f).read_text(encoding="utf-8")
+    old = 'exp.If: {"annotator": lambda self, e: self._annotate_by_args(e, "true", "false", promote=True)},'
+    assert text.count(old) == 1
+    import difflib
+
+    new = text.replace(old, old.replace("promote=True", "promote=False"))
+    diff = "".join(difflib.unified_diff(text.splitlines(True), new.splitlines(True), f"a/{f}", f"b/{f}"))
+    got = _run(tmp_path, {"c": f"diff --git a/{f} b/{f}\n" + diff}, capsys)
+    assert got["c"] is False
+
+
+def test_lambda_called_at_import_is_an_import_time_edit():
+    """T25: a lambda the parser module calls while it is imported (maps/tpcds_lambdas.json "called") is never narrowed."""
+    import json
+
+    import tpcds_scope
+
+    tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
+    assert tp.lambda_called and any(k.startswith("sqlglot/parser.py:") for k in tp.lambda_called)
+    assert any(k.startswith("sqlglot/generators/python.py:") for k in tp.lambda_q)
