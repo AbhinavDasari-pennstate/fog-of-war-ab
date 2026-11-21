@@ -36,3 +36,8 @@ eval:
 
 presubmit:
 	bash tools/presubmit.sh
+
+# Laptop only. SRC = sqlglot checkout at the pinned SHA, RUN = instrumented run dirs (see tools/build_maps.py).
+.PHONY: maps
+maps:
+	$(PY) tools/build_maps.py build --src $(SRC) --run $(RUN) --tests $(SAMPLE)/tests.json --flaky $(FLAKY) --out maps --python $(PY)
