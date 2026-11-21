@@ -154,7 +154,8 @@ def _keep(why):
 
 
 def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
-    """{query: stages} for one modified sqlglot file, or a string (the reason to keep)."""
+    """({query: stages}, why) for one modified sqlglot file; (None, why) for an import-time edit (every
+    query must be replayed); a string (the reason to keep) when the file cannot be judged."""
     from pathlib import Path
 
     path = change.path_new
@@ -171,9 +172,9 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
     old_d, old_shell = _shell_and_units(old_tree)
     new_d, new_shell = _shell_and_units(new_tree)
     if old_shell != new_shell:
-        return f"{path}: module or class level, a def header or a decorator changed"
+        return None, f"{path}: import-time edit (module or class level, a def header or a decorator)"
     if set(old_d) != set(new_d):
-        return f"{path}: functions added or removed"
+        return None, f"{path}: import-time edit (functions added or removed)"
     changed = [k for k in old_d if old_d[k][0] != new_d[k][0]]
     rebinds = {k for k in changed if old_d[k][1] != new_d[k][1]}
     if not changed:
@@ -232,7 +233,7 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
             lines = whole
             ms = reach(lines)
         if lines & base:
-            return f"{path}:{key[0]}: changed code also runs at import or in setUpClass"
+            return None, f"{path}:{key[0]}: import-time edit (the changed code also runs at import or in setUpClass)"
         for si, v in enumerate(ms):
             q = 0
             while v:
@@ -283,6 +284,7 @@ def scope(per_file, tp: TpcdsMap, src_root) -> Scope:
     not depend on are ignored; every other file must be a modified sqlglot/**.py."""
     plan: dict[int, set] = {}
     notes = []
+    import_time = False
     for change, depends in per_file:
         if not depends:
             continue
@@ -306,7 +308,14 @@ def scope(per_file, tp: TpcdsMap, src_root) -> Scope:
         if isinstance(got, str):
             return _keep(got)
         p, why = got
+        notes.append(why)
+        if p is None:
+            import_time = True
+            continue
         for q, st in p.items():
             plan.setdefault(q, set()).update(st)
-        notes.append(why)
+    if import_time:
+        # An edit that runs at import or class creation can be read by any query: the child imports the
+        # patched tree fresh (every module, as a pytest session has), and every query is replayed.
+        return Scope("replay", {q: ("E" if tp.q[q]["tables"] else "P") for q in range(tp.n)}, "; ".join(notes))
     return Scope("replay", {q: "".join(x for x in STAGES if x in st) for q, st in plan.items()}, "; ".join(notes))

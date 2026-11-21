@@ -54,6 +54,12 @@ MUTANTS = {
         "            Table = [tuple(row[name] for name in column_names) for row in table]\n",
         True, "a statement no query reaches that makes Table local to the whole function (UnboundLocalError)",
     ),
+    "constant_harmless": (
+        "sqlglot/dialects/mysql.py",
+        "    SAFE_DIVISION = True\n",
+        "    SAFE_DIVISION = False\n",
+        False, "class-level constant of a dialect no TPC-DS query uses: the real test still passes",
+    ),
     "state": (
         "sqlglot/executor/__init__.py",
         "    result = PythonExecutor(tables=tables_).execute(plan)\n",

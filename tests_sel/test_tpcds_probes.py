@@ -76,3 +76,31 @@ def test_changed_query_text_keeps_giant(tmp_path, capsys):
     assert got["c"] is changed or got["c"] is True
     if changed:
         assert got["c"] is True
+
+
+def _replay_verdict(name, tmp_path):
+    """(plan size, replay said same) for a mutant, running scope and the replay child directly."""
+    import diffparse
+    import tpcds_scope
+
+    tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
+    changes = diffparse.parse(M.patch_text(str(PIN), name))
+    sc = tpcds_scope.scope([(c, True) for c in changes], tp, PIN)
+    assert sc.kind == "replay"
+    patched = {}
+    for c in changes:
+        old = (PIN / c.path_new).read_bytes().decode("utf-8")
+        patched[c.path_new] = diffparse.apply(old, c)
+    same, why = sel._run_replay(sc.plan, patched, PIN, 120, 1)
+    return len(sc.plan), same, why
+
+
+def test_class_constant_edit_replays_every_query_and_passes_when_harmless(tmp_path):
+    """T19: an import-time edit is replayed over every query on a freshly imported patched tree."""
+    n, same, why = _replay_verdict("constant_harmless", tmp_path)
+    assert n == 99 and same, why
+
+
+def test_class_table_edit_that_breaks_queries_is_caught_by_the_replay(tmp_path):
+    n, same, why = _replay_verdict("classlevel", tmp_path)
+    assert n == 99 and not same, why

@@ -123,12 +123,23 @@ TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
 # Run-time replay budgets (3 min batch limit, CPU is scored). The budget is spent in ESTIMATED seconds
 # (the map's build-time measurements times a slack), cheapest replay first, so the same batch always
 # gets the same decisions whatever the machine load. The wall clock is only an emergency stop.
-REPLAY_EST_BUDGET_S = float(os.environ.get("BR_REPLAY_EST", "110"))
+REPLAY_EST_BUDGET_S = float(os.environ.get("BR_REPLAY_EST", "150"))
 REPLAY_EMERGENCY_WALL_S = float(os.environ.get("BR_REPLAY_WALL", "140"))
 REPLAY_PER_COMMIT_S = float(os.environ.get("BR_REPLAY_COMMIT", "40"))
 # The replay must cost clearly less than the giant it replaces (build-machine seconds x slack).
-REPLAY_SLACK = 1.3
-REPLAY_OVERHEAD_S = 1.2
+# A replay is run only when its estimated CPU is below this share of the simulated seconds the drop
+# saves (a replay that finds a failure costs less than its estimate, one that passes costs about it).
+REPLAY_WORTH = 0.8
+REPLAY_SLACK = 1.15
+REPLAY_OVERHEAD_S = 1.0
+
+
+def _cost(workers, dur) -> int:
+    """The scorer's cost of one commit in ms: busiest worker plus 2 s per worker."""
+    ws = [w for w in workers if w]
+    if not ws:
+        return 0
+    return max(sum(dur[n] for n in w) for w in ws) + 2000 * len(ws)
 
 
 def _tpcds_candidate(patch_text: str, src_root: Path, tests: list[dict], maps, chosen, tp):
@@ -215,21 +226,32 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
                         pending.append((est, patch.stem, num, sc, patched, chosen))
             except Exception as exc:
                 print(f"  tpcds refine failed ({type(exc).__name__}: {exc}): giant stays", file=sys.stderr)
-    # replays, cheapest first, inside the budgets
+    # replays, cheapest first, inside the budgets; two at a time (the container has 2 cores). Which
+    # replays are submitted depends only on the estimates, so the same batch gets the same decisions.
     wall0 = time.monotonic()
     spent = 0.0
     import resource
+    from concurrent.futures import ThreadPoolExecutor
 
     base_cpu = lambda: (lambda r: r.ru_utime + r.ru_stime)(resource.getrusage(resource.RUSAGE_CHILDREN))  # noqa: E731
-    pending.sort(key=lambda x: (x[0], x[1]))
-    for est, commit, num, sc, patched, chosen in pending:
-        gain = dur[num] / 1000.0
-        if est > gain * 0.8:
-            print(f"{commit}: tpcds replay est {est:.1f}s vs giant {gain:.1f}s: giant stays", file=sys.stderr)
-            continue
-        if not sc.plan:
-            ok, why = True, "no query reaches the changed code"
-        else:
+    pending.sort(key=lambda x: (x[0], x[1]))  # cheapest first: the budget buys the most drops
+    jobs = []  # (commit, num, chosen, future, est)
+
+    def job(sc, patched, seed, limit):
+        w0 = time.monotonic()
+        ok, why = _run_replay(sc.plan, patched, src_root, limit, seed)
+        return ok, why + f"; {len(sc.plan)} queries, est {{est:.1f}}s, wall {time.monotonic() - w0:.1f}s"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for est, commit, num, sc, patched, chosen in pending:
+            gain = (_cost(_pack(chosen, tests), dur) - _cost(_pack(chosen - {num}, tests), dur)) / 1000.0
+            if est > gain * REPLAY_WORTH:
+                print(f"{commit}: tpcds replay est {est:.1f}s vs giant {gain:.1f}s: giant stays", file=sys.stderr)
+                continue
+            if not sc.plan:
+                rows[commit] = _pack(chosen - {num}, tests)
+                print(f"{commit}: tpcds replay identical: giant dropped (no query reaches the changed code)", file=sys.stderr)
+                continue
             if spent + est > REPLAY_EST_BUDGET_S:
                 print(f"{commit}: tpcds replay estimate budget spent: giant stays", file=sys.stderr)
                 continue
@@ -239,13 +261,13 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
                 continue
             spent += est
             seed = zlib.crc32(commit.encode()) % 8
-            c0, w0 = base_cpu(), time.monotonic()
-            ok, why = _run_replay(sc.plan, patched, src_root, min(REPLAY_PER_COMMIT_S, left_wall), seed)
-            why += f"; {len(sc.plan)} queries, est {est:.1f}s, cpu {base_cpu() - c0:.1f}s, wall {time.monotonic() - w0:.1f}s"
-        print(f"{commit}: tpcds replay {'identical: giant dropped' if ok else 'giant stays'} ({why})", file=sys.stderr)
-        if ok:
-            chosen2 = chosen - {num}
-            rows[commit] = _pack(chosen2, tests)
+            jobs.append((commit, num, chosen, pool.submit(job, sc, patched, seed, min(REPLAY_PER_COMMIT_S, left_wall)), est))
+        for commit, num, chosen, fut, est in jobs:
+            ok, why = fut.result()
+            why = why.replace("{est:.1f}", f"{est:.1f}")
+            print(f"{commit}: tpcds replay {'identical: giant dropped' if ok else 'giant stays'} ({why})", file=sys.stderr)
+            if ok:
+                rows[commit] = _pack(chosen - {num}, tests)
     for commit in sorted(rows):
         print(json.dumps({"commit": commit, "workers": rows[commit]}))
     print(f"v0 done: {len(tests)} tests known", file=sys.stderr)

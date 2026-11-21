@@ -108,8 +108,8 @@ def main():
         "queries": {
             str(i): {
                 **{st: sorted(seen[i][st]) for st in STAGES},
-                "tables": tables[i], "cpu": round(statistics.median(cpus[i]), 4),
-                "stage_cpu": {st: round(statistics.median(v), 4) for st, v in scpu.get(i, {}).items()},
+                "tables": tables[i], "cpu": round(min(cpus[i]), 4),
+                "stage_cpu": {st: round(min(v), 4) for st, v in scpu.get(i, {}).items()},
                 "G": {st: sorted(v) for st, v in gseen[i].items()},
                 "unstable": i in unstable, "mutates": i in notok,
             }
