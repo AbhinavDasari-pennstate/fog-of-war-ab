@@ -128,7 +128,7 @@ REPLAY_EMERGENCY_WALL_S = float(os.environ.get("BR_REPLAY_WALL", "140"))
 REPLAY_PER_COMMIT_S = float(os.environ.get("BR_REPLAY_COMMIT", "40"))
 # The replay must cost clearly less than the giant it replaces (build-machine seconds x slack).
 # The board charges CPU at about BOARD_K times the native seconds measured here (v2: 0.6 s native, 1.10 on the board).
-BOARD_K = float(os.environ.get("BR_K", "2.5"))
+BOARD_K = float(os.environ.get("BR_K", "4"))
 # A replay is run only when its estimated CPU is below this share of the simulated seconds the drop
 # saves (est is native CPU; the board multiplies it by BOARD_K).
 REPLAY_WORTH = 0.8
