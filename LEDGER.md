@@ -62,3 +62,24 @@ Top waste commits:
 - bj7g (code): +0.2 s over the oracle, 2 picked vs 1 failing
 
 Misses: 0. Simulated total from the kit scorer: 113.060 s.
+
+
+## CPU diet, before and after (phase totals on the 30 sample commits)
+
+Median of 3 interleaved container runs per side on cpus 16,17 under the board flags, via tools/phase_profile.py (same
+timers as above). Before = 314df58, after = lane-c-cpu. The machine was loaded by other lanes, so read the ratios.
+
+| phase | before ms | after ms |
+|---|---:|---:|
+| map load and decode | 346 | 342 |
+| patch parse and apply | 14 | 10 |
+| ast.parse | 1035 | 536 |
+| ast.dump | 546 | 58 |
+| compile() | 700 | 177 |
+| pyscope walks | 714 | 184 |
+| weakmut | 610 | 47 |
+| attrrule + tpcds_scope | 55 | 54 |
+| packing | 3 | 4 |
+| rest of rules and main | 534 | 382 |
+| module imports | 295 | 33 |
+| **main process, whole run** | 5170 | 2362 |
