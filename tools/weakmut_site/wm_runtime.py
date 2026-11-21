@@ -104,7 +104,11 @@ def wm_m(key):
 
 
 def wm_c(key, opi, taint, a, b):
-    r = OPFN[opi](a, b)
+    try:
+        r = OPFN[opi](a, b)
+    except BaseException:  # the original operator raised: the site ran, and no mutant is known to raise the same
+        _note(key, EVAL | ALL)
+        raise
     if _busy[0]:
         return r
     if taint:  # an operand may come from hash()/id(): its order alternatives are process dependent

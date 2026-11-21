@@ -75,6 +75,10 @@ PROBES = [
     ("and_to_or_value_context", "return a and b", "return a or b", [(1, 2)], False),
     ("not_removed_unreached", "return b if a else (not b)", "return b if a else b", [(1, 5)], True),
     ("not_removed_reached", "return not a", "return a", [(1, 5)], False),
+    # the original operator itself raised on the recorded evaluation: the site ran, the mutant may not raise
+    ("orig_op_raises_propagates", "return a < b", "return a == b", [(1, "x")], False),
+    ("orig_op_raises_caught", "try:\n        return a < b\n    except TypeError:\n        return None",
+     "try:\n        return a == b\n    except TypeError:\n        return None", [(1, "x")], False),
 ]
 
 

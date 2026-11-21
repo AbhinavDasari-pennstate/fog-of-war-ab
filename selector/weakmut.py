@@ -21,7 +21,7 @@ of the def, class bodies, module level).
 
 import ast
 
-RECORDER_VERSION = 2
+RECORDER_VERSION = 3
 OPS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq, ast.Is, ast.IsNot, ast.In, ast.NotIn)
 EVAL_BIT = 1 << 10
 ALT_BIT = 1 << 11
