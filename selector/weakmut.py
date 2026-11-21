@@ -21,6 +21,8 @@ of the def, class bodies, module level).
 
 import ast
 
+import pyscope
+
 RECORDER_VERSION = 3
 OPS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq, ast.Is, ast.IsNot, ast.In, ast.NotIn)
 EVAL_BIT = 1 << 10
@@ -95,6 +97,77 @@ def collect(tree) -> dict:
     return sites
 
 
+def _site_of(n):
+    """The kind collect() records for node n when it is visited inside a function body."""
+    if isinstance(n, ast.Compare) and len(n.ops) == 1 and op_index(n.ops[0]) >= 0:
+        return "C"
+    if isinstance(n, ast.BoolOp):
+        return "B"
+    if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not):
+        return "N"
+    return None
+
+
+def _may_hold(n, lo, hi) -> bool:
+    """False only when node n certainly cannot contain a node that sits on lines lo..hi. A node with no lines of its
+    own (arguments, comprehension, ...) may; a decorated def starts at its first decorator."""
+    first = getattr(n, "lineno", None)
+    last = getattr(n, "end_lineno", None)
+    if first is None or last is None:
+        return True
+    for d in getattr(n, "decorator_list", ()):
+        if d.lineno < first:
+            first = d.lineno
+    return first <= lo and hi <= last
+
+
+def site_kind(tree, target):
+    """collect(tree).get(id(target)), found by the same walk as collect() that enters only the nodes whose lines can
+    hold the target (collect() visits every node of a file of thousands of lines for one answer). A target the walk
+    does not reach falls back to collect()."""
+    lo, hi = target.lineno, target.end_lineno
+    found = []
+
+    def visit(n, fn):
+        return _may_hold(n, lo, hi) and go(n, fn)
+
+    def go(n, fn):
+        if n is target:
+            found.append(_site_of(n) if fn else None)
+            return True
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for d in n.decorator_list:
+                if visit(d, fn):
+                    return True
+            if visit(n.args, fn):
+                return True
+            if n.returns is not None and visit(n.returns, fn):
+                return True
+            return any(visit(s, True) for s in n.body)
+        if isinstance(n, ast.Lambda):
+            return visit(n.args, fn) or visit(n.body, True)
+        if isinstance(n, ast.ClassDef):
+            for d in n.decorator_list:
+                if visit(d, fn):
+                    return True
+            for b in n.bases:
+                if visit(b, fn):
+                    return True
+            for k in n.keywords:
+                if visit(k, fn):
+                    return True
+            return any(visit(s, False) for s in n.body)
+        return any(visit(c, fn) for c in ast.iter_child_nodes(n))
+
+    try:
+        go(tree, False)
+    except RecursionError:  # a target under a very deep expression: collect() recurses less per level
+        found.clear()
+    if found:
+        return found[0]
+    return collect(tree).get(id(target))
+
+
 def bool_nodes(tree) -> set:
     """ids of expressions whose value is only used for its truth value (kept for tooling; the rule no longer
     relies on it). Operands of a BoolOp are truth-only only when the BoolOp itself is: `(a and b) or c` used
@@ -114,7 +187,7 @@ def bool_nodes(tree) -> set:
 
 # ---- run time: recognise the mutation -------------------------------------------------------
 
-def _diff(a, b, out, pa, pb):
+def _diff(a, b, out, pa, pb, same=None):
     if type(a) is not type(b):
         if isinstance(a, (ast.cmpop, ast.boolop, ast.operator, ast.unaryop)):
             out.append((pa, pb))
@@ -123,21 +196,24 @@ def _diff(a, b, out, pa, pb):
         return
     if isinstance(a, ast.AST):
         for f in a._fields:
-            _diff(getattr(a, f, None), getattr(b, f, None), out, a, b)
+            _diff(getattr(a, f, None), getattr(b, f, None), out, a, b, same)
     elif isinstance(a, list):
         if len(a) != len(b):
             out.append((pa, pb))
             return
         for x, y in zip(a, b):
-            _diff(x, y, out, pa, pb)
+            if same is not None and isinstance(x, ast.stmt) and isinstance(y, ast.stmt) and same(x, y):
+                continue  # written exactly alike: equal trees, no difference to find
+            _diff(x, y, out, pa, pb, same)
     elif a != b:
         out.append((pa, pb))
 
 
-def find_mutation(old_tree, new_tree):
-    """(old_node, new_node) when the two trees differ in exactly one place, else None."""
+def find_mutation(old_tree, new_tree, same=None):
+    """(old_node, new_node) when the two trees differ in exactly one place, else None. `same` is pyscope.stmt_same of
+    the two texts: statements it calls alike are not compared."""
     out = []
-    _diff(old_tree, new_tree, out, old_tree, new_tree)
+    _diff(old_tree, new_tree, out, old_tree, new_tree, same)
     if len(out) != 1:
         return None
     a, b = out[0]
@@ -148,8 +224,7 @@ def find_mutation(old_tree, new_tree):
 
 def classify(old_tree, a, b):
     """('C', mutated_op_index) | ('B', None) | ('N', None) | None for the mutation a -> b."""
-    sites = collect(old_tree)
-    kind = sites.get(id(a))
+    kind = site_kind(old_tree, a)
     if kind is None:
         return None
     if kind == "C":
@@ -192,12 +267,34 @@ def _root(node):
     return node.id if isinstance(node, ast.Name) else None
 
 
-def writes_shared_state(tree, target) -> bool:
-    """True unless the function holding `target` provably writes only to its own locals and arguments' objects.
+def _enclosing_function(tree, target):
+    """The nearest def, async def or lambda above target (None when there is none, or the target is not in the tree).
+    Found by walking only the nodes whose lines can hold the target; a target that walk does not reach gets the
+    answer from a parent map of the whole tree, as before."""
+    lo, hi = target.lineno, target.end_lineno
+    path = []
 
-    A function that stores into cls, a class name, a module level name or a global, mutates a container with such a root,
-    or is cached, may leave the changed value behind for later tests (Dialect._classes is filled this way). Anything not
-    inside a plain function (a lambda, a class body) counts as shared."""
+    def go(n):
+        if n is target:
+            return True
+        if not _may_hold(n, lo, hi):
+            return False
+        path.append(n)
+        for c in ast.iter_child_nodes(n):
+            if go(c):
+                return True
+        path.pop()
+        return False
+
+    try:
+        hit = go(tree)
+    except RecursionError:
+        hit = False
+    if hit:
+        for n in reversed(path):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return n
+        return None
     parents = {}
     for n in ast.walk(tree):
         for c in ast.iter_child_nodes(n):
@@ -205,6 +302,16 @@ def writes_shared_state(tree, target) -> bool:
     fn = parents.get(id(target))
     while fn is not None and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         fn = parents.get(id(fn))
+    return fn
+
+
+def writes_shared_state(tree, target) -> bool:
+    """True unless the function holding `target` provably writes only to its own locals and arguments' objects.
+
+    A function that stores into cls, a class name, a module level name or a global, mutates a container with such a root,
+    or is cached, may leave the changed value behind for later tests (Dialect._classes is filled this way). Anything not
+    inside a plain function (a lambda, a class body) counts as shared."""
+    fn = _enclosing_function(tree, target)
     if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return True
     module_names = set()
@@ -291,9 +398,9 @@ def drops(path, patch_changes, old_text, new_text, summaries, srcreaders=0):
     """
     if not summaries:
         return set(), ""
-    old_tree = ast.parse(old_text, path)
-    new_tree = ast.parse(new_text, path)
-    m = find_mutation(old_tree, new_tree)
+    old_tree = pyscope.parse(old_text, path)
+    new_tree = pyscope.parse(new_text, path)
+    m = find_mutation(old_tree, new_tree, pyscope.stmt_same(old_text, new_text))
     if m is None:
         return set(), "weakmut: not a single-site change"
     a, b = m

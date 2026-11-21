@@ -4,6 +4,8 @@ Stdlib only. Nothing here imports sqlglot.
 """
 
 import ast
+import marshal
+import os
 import re
 
 CODING = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
@@ -22,8 +24,37 @@ def cookie(text: str) -> list:
     return out
 
 
+# ---- caches: the same file text is parsed and compiled by several rules of one run -------------------
+#
+# No selector code changes a tree it gets from parse(): default_only puts its stand-ins back before it
+# returns, and tpcds_scope, which blanks function bodies, parses on its own. A few entries only: a tree of a
+# big sqlglot file is tens of megabytes.
+
+_CACHE_MAX = 6
+_PARSED: dict = {}  # (text, path) -> tree
+_TREE_CODE: dict = {}  # id(tree) -> (tree, code object compile() made of it)
+_SCOPE_TABLES: dict = {}  # (text, path) -> scope table
+
+
+def _put(cache: dict, key, value):
+    if len(cache) >= _CACHE_MAX:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+    return value
+
+
+def clear_caches():
+    _PARSED.clear()
+    _TREE_CODE.clear()
+    _SCOPE_TABLES.clear()
+
+
 def parse(text: str, path: str = "<src>"):
-    return ast.parse(text, filename=path)
+    key = (text, path)
+    tree = _PARSED.get(key)
+    if tree is None:
+        tree = _put(_PARSED, key, ast.parse(text, filename=path))
+    return tree
 
 
 def dump(tree) -> str:
@@ -33,10 +64,37 @@ def dump(tree) -> str:
 def compiles(tree, path: str = "<src>") -> bool:
     """True when the parsed tree also survives the compiler (catches 'return' outside a function)."""
     try:
-        compile(tree, path, "exec", dont_inherit=True)
-        return True
+        code = compile(tree, path, "exec", dont_inherit=True)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return False
+    _put(_TREE_CODE, id(tree), (tree, code))
+    return True
+
+
+def stmt_same(old_text: str, new_text: str):
+    """same(a, b) -> True only when statement a of the old file and statement b of the new file are written exactly
+    alike (the same lines, from its first decorator to its last line, at the same columns). Such statements parse to
+    equal trees, so a walk that compares two trees can skip them. None when a carriage return makes line numbers
+    ambiguous: the caller then compares everything."""
+    if "\r" in old_text or "\r" in new_text:
+        return None
+    ol = old_text.split("\n")
+    nl = new_text.split("\n")
+
+    def first(n):
+        lo = n.lineno
+        for d in getattr(n, "decorator_list", ()):
+            if d.lineno < lo:
+                lo = d.lineno
+        return lo
+
+    def same(a, b):
+        if type(a) is not type(b) or a.col_offset != b.col_offset or a.end_col_offset != b.end_col_offset:
+            return False
+        la, lb = first(a), first(b)
+        return a.end_lineno - la == b.end_lineno - lb and ol[la - 1:a.end_lineno] == nl[lb - 1:b.end_lineno]
+
+    return same
 
 
 def names_in(lines) -> set:
@@ -252,12 +310,16 @@ def default_only(old_tree, new_tree):
     return changed if same else None
 
 
-def rebound_spans(old_tree, new_tree) -> list:
-    """Old-file line spans (lo, hi) of functions whose binding set changed."""
-    new = {k: bind_sig(n) for k, n in units(new_tree)}
+def rebound_spans(old_tree, new_tree, same=None) -> list:
+    """Old-file line spans (lo, hi) of functions whose binding set changed. `same` (stmt_same) lets two functions that
+    are written exactly alike skip the comparison: equal trees bind equal names."""
+    new = dict(units(new_tree))
     out = []
     for k, n in units(old_tree):
-        if k in new and new[k] != bind_sig(n):
+        m = new.get(k)
+        if m is None or (same is not None and same(n, m)):
+            continue
+        if bind_sig(m) != bind_sig(n):
             out.append((min([n.lineno] + [d.lineno for d in n.decorator_list]), n.end_lineno))
     return out
 
@@ -267,8 +329,8 @@ def rebound_spans(old_tree, new_tree) -> list:
 _GEN_FLAGS = 0x20 | 0x80 | 0x200 | 0x100  # generator, coroutine, async generator, iterable coroutine
 
 
-def _code_scopes(text: str, path: str):
-    """key -> (locals, names, frees, flags, first line, last line) for every code object of the module."""
+def _scopes_of(code) -> dict:
+    """key -> (locals, names, frees, flags, code object) for every code object nested in the module code `code`."""
     import types
 
     out = {}
@@ -280,44 +342,88 @@ def _code_scopes(text: str, path: str):
                 n = seen.get(c.co_name, 0)
                 seen[c.co_name] = n + 1
                 key = f"{prefix}/{c.co_name}#{n}"
-                lines = [ln for _, _, ln in c.co_lines() if ln is not None]
                 out[key] = (
                     frozenset(c.co_varnames) | frozenset(c.co_cellvars), frozenset(c.co_names), frozenset(c.co_freevars),
-                    c.co_flags & _GEN_FLAGS, min(lines + [c.co_firstlineno]), max(lines + [c.co_firstlineno]),
+                    c.co_flags & _GEN_FLAGS, c,
                 )
                 walk(c, key)
 
-    walk(compile(text, path, "exec", dont_inherit=True), "")
+    walk(code, "")
     return out
 
 
-def scope_hazards(old_text: str, new_text: str, path: str = "<src>") -> list:
+def _span(c) -> tuple:
+    """(first line, last line) of a code object: only the functions the edit breaks need it."""
+    lines = [ln for _, _, ln in c.co_lines() if ln is not None]
+    return min(lines + [c.co_firstlineno]), max(lines + [c.co_firstlineno])
+
+
+def _pyc_code(file: str, text: str):
+    """The module code object from the file's .pyc, when that .pyc is the compiled form of exactly this text (header
+    flags, source mtime and size agree with the file, and the text is as long as the file); else None."""
+    try:
+        import _frozen_importlib_external as ext
+
+        with open(ext.cache_from_source(file), "rb") as fh:
+            data = fh.read()
+        st = os.stat(file)
+        if (len(data) < 16 or data[:4] != ext.MAGIC_NUMBER or data[4:8] != b"\0\0\0\0"
+                or int.from_bytes(data[8:12], "little") != int(st.st_mtime) & 0xFFFFFFFF
+                or int.from_bytes(data[12:16], "little") != st.st_size & 0xFFFFFFFF
+                or st.st_size != len(text.encode("utf-8"))):
+            return None
+        return marshal.loads(memoryview(data)[16:])
+    except Exception:
+        return None
+
+
+def _code_scopes(text: str, path: str, tree=None, file=None) -> dict:
+    """The scope table of the module `text` (cached). Its code object comes, cheapest first, from the compile that
+    compiles() already did for `tree`, from the file's .pyc, or from compiling the text."""
+    key = (text, path)
+    got = _SCOPE_TABLES.get(key)
+    if got is None:
+        code = None
+        if tree is not None:
+            hit = _TREE_CODE.get(id(tree))
+            if hit is not None and hit[0] is tree:
+                code = hit[1]
+        if code is None and file is not None:
+            code = _pyc_code(file, text)
+        if code is None:
+            code = compile(text, path, "exec", dont_inherit=True)
+        got = _put(_SCOPE_TABLES, key, _scopes_of(code))
+    return got
+
+
+def scope_hazards(old_text: str, new_text: str, path: str = "<src>", old_file=None, new_tree=None) -> list:
     """Old-file line ranges of every function scope that the edit changes as a whole.
 
     An edit to one statement can break every call of its function without that statement running: it can make the
     function a generator or coroutine, change which of its names are local (a name that was read from the module now
     binds in the function, or the reverse), or change what it takes from an enclosing scope. Returns [] when the
-    scope tables match; raises when either text does not compile (the caller already widens then)."""
-    a = _code_scopes(old_text, path)
-    b = _code_scopes(new_text, path)
+    scope tables match; raises when either text does not compile (the caller already widens then).
+    old_file: path of the unmodified file (its .pyc spares compiling it); new_tree: the parsed new text (its compile is reused)."""
+    a = _code_scopes(old_text, path, file=old_file)
+    b = _code_scopes(new_text, path, tree=new_tree)
     out = []
-    for key, (loc_a, nam_a, fre_a, fl_a, s, e) in a.items():
+    for key, (loc_a, nam_a, fre_a, fl_a, code_a) in a.items():
         rec = b.get(key)
         if rec is None:
             continue  # the scope itself was added or removed: the statement rules see that
-        loc_b, nam_b, fre_b, fl_b, _, _ = rec
+        loc_b, nam_b, fre_b, fl_b, _ = rec
         added, removed = loc_b - loc_a, loc_a - loc_b
         bad = fl_a != fl_b or fre_a != fre_b or bool(added & (nam_a | fre_a)) or bool(removed & (nam_b | fre_b))
         if bad:
-            out.append((s, e))
+            out.append(_span(code_a))
     return out
 
 
-def function_hazards(old_text: str, new_text: str, old_tree, new_tree, path: str = "<src>") -> list:
+def function_hazards(old_text: str, new_text: str, old_tree, new_tree, path: str = "<src>", old_file=None) -> list:
     """One answer for "an edit that acts on a whole function": old-file line spans of every function whose binding set
     changed (rebound_spans: a made-local name, global, yield, await) or whose compiled scope table changed
     (scope_hazards: locals read as globals, closure, generator and coroutine flags). The union of both, so it is
     at least as strict as either."""
-    spans = set(rebound_spans(old_tree, new_tree))
-    spans.update(scope_hazards(old_text, new_text, path))
+    spans = set(rebound_spans(old_tree, new_tree, stmt_same(old_text, new_text)))
+    spans.update(scope_hazards(old_text, new_text, path, old_file=old_file, new_tree=new_tree))
     return sorted(spans)

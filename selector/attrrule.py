@@ -12,6 +12,8 @@ import os
 import re
 import zlib
 
+import pyscope
+
 _SIMPLE_ATOMS = (ast.Constant,)
 _UNARY = (ast.USub, ast.UAdd, ast.Not)
 
@@ -96,10 +98,15 @@ def bare_use(cls_node, own, name: str) -> bool:
     return False
 
 
-def find(old_tree, new_tree, old_text: str):
+def find(old_tree, new_tree, old_text: str, new_text=None):
     """(start_line, class qualname, name) when the trees differ in exactly one class-level
-    assignment whose old and new values are simple; else None."""
+    assignment whose old and new values are simple; else None.
+
+    new_text, when given, lets statements that are written exactly alike in both files skip the tree comparison
+    (pyscope.stmt_same), and a class whose header is unchanged is entered without first dumping its whole body: if
+    its body was equal too, every pair inside is equal and the walk below finds nothing, as the dump would have."""
     found = []
+    same = pyscope.stmt_same(old_text, new_text) if new_text is not None else None
 
     def dump(x):
         return ast.dump(x)
@@ -108,7 +115,9 @@ def find(old_tree, new_tree, old_text: str):
         if len(ob) != len(nb):
             return False
         for a, b in zip(ob, nb):
-            if dump(a) == dump(b):
+            if same is not None and same(a, b):
+                continue
+            if same is None and dump(a) == dump(b):
                 continue
             if isinstance(a, ast.ClassDef) and isinstance(b, ast.ClassDef) and a.name == b.name and \
                     dump(ast.Tuple(elts=a.bases + [k.value for k in a.keywords] + a.decorator_list)) == \
@@ -116,6 +125,8 @@ def find(old_tree, new_tree, old_text: str):
                     [k.arg for k in a.keywords] == [k.arg for k in b.keywords]:
                 if not walk(a.body, b.body, stack + [a.name], a):
                     return False
+                continue
+            if same is not None and dump(a) == dump(b):
                 continue
             if stack and type(a) is type(b) and isinstance(a, ast.Assign):
                 if len(a.targets) != 1 or dump(a.targets[0]) != dump(b.targets[0]) or not isinstance(a.targets[0], ast.Name):
