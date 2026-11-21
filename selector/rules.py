@@ -231,13 +231,14 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
             out |= m.names_attr.get(n, 0)
     nr = ctx.narrow
     if nr is not None and nr[0] == start:
-        out |= nr[1]  # L2: only the tests that read this attribute (recorded), never the whole class
+        # L2: only the tests that read this attribute (recorded); a test with no recording stays only if today's rule keeps it
+        out |= nr[1] | (nr[2] & (a or (b | m.files.get(path, 0))))
         ctx.note(f"L2 {path}:{start} attribute read map")
     elif a:
         out |= a
     else:
         out |= b | m.files.get(path, 0)
-    if out == 0:
+    if out == 0 and not (nr is not None and nr[0] == start):
         out = ctx.wide(path)
     return out
 
@@ -366,7 +367,7 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
             if f:
                 got = ctx.attr().readers(path, f[1], f[2])
                 if got is not None:
-                    ctx.narrow = (f[0], got)
+                    ctx.narrow = (f[0], got[0], got[1])
         except Exception:
             ctx.narrow = None
     hard, soft_r = [], []

@@ -104,6 +104,8 @@ def find(old_tree, new_tree, old_text: str):
 class Attr:
     def __init__(self, maps_dir: str):
         self.ok = False
+        if os.environ.get("BR_NO_L2") == "1":
+            return
         p = os.path.join(maps_dir, "attrreads.bin")
         if not os.path.exists(p):
             return
@@ -117,6 +119,7 @@ class Attr:
             self.reads = d["reads"]
             self.derived = {q: frozenset(v) for q, v in d["derived"].items()}
             self.enums = frozenset(d["enums"])
+            self.seen = frozenset(n for v in d["reads"].values() for n in v)
             self.unrecorded = 0
             for n in d["unrecorded"]:
                 self.unrecorded |= 1 << n
@@ -125,7 +128,7 @@ class Attr:
             self.ok = False
 
     def readers(self, path: str, cls: str, name: str):
-        """Mask of the tests that read name through cls (or a subclass), or None: use today's rule."""
+        """(mask of the tests that read name through cls or a subclass, mask of tests with no recording) or None: use today's rule."""
         if not self.ok or not cls or name not in self.names:
             return None
         q = f"{module_of(path)}:{cls}"
@@ -133,5 +136,7 @@ class Attr:
             return None
         i = self.reads.get(q, {}).get(name)
         if not i:
-            return None
-        return self.sets[i] | self.unrecorded
+            # nobody read it through this class: fine when the recorder saw the name read elsewhere (so the
+            # instrument covers it); a name no test ever read gets today's rule
+            return (0, self.unrecorded) if name in self.seen else None
+        return self.sets[i], self.unrecorded
