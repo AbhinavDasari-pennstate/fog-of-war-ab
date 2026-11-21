@@ -16,7 +16,7 @@ Tables (every value that is a "set" is an int bitmask, already resolved):
   reads      path -> mask                tests that opened the (non-.py) file; setUpClass and
                                           collection-time reads count for the whole class/module
   srcreaders path -> mask                tests that read the text of a .py/sqlglotc file
-  imports    file -> mask                tests whose test file imports the module (static + runtime)
+  imports    file -> mask                tests that import the module, cold: static + runtime of their file, plus lazy imports (lazyimp.bin)
   names_class qualname -> mask           tests that instantiated the class or a subclass, or ran
                                           any line inside it (any file)
   names_attr  name -> mask               tests that ran any line that mentions the name, for names
@@ -56,6 +56,11 @@ class Maps:
         self.reads = {k: sets[v] for k, v in _read(d, "reads.bin").items()}
         self.srcreaders = {k: sets[v] for k, v in _read(d, "srcreaders.bin").items()}
         self.imports = {k: sets[v] for k, v in _read(d, "imports.bin").items()}
+        # cold import sets per test, lazy imports included (tools/lazyimp.py): only ever adds tests
+        lp = os.path.join(d, "lazyimp.bin")
+        if os.path.exists(lp):
+            for k, v in _read(d, "lazyimp.bin").items():
+                self.imports[k] = self.imports.get(k, 0) | v
         names = _read(d, "names.bin")
         self.names_class = {k: sets[v] for k, v in names["class"].items()}
         self.names_attr = {k: sets[v] for k, v in names["attr"].items()}

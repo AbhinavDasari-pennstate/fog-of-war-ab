@@ -184,6 +184,12 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
     out = m.stmt_mask(path, ln)
     if d0:  # def header or decorator: callers run the body, so the def's coverage decides
         out |= ctx.udef(path, d0, d1)
+        if any(l in il for l in range(end + 1, d1 + 1)):  # body lines only: the header always runs at import
+            # a line of the body ran at import time: something calls the function while a module or
+            # class is being built, so a changed decorator or signature changes what every importer
+            # gets (or fails to import). Those lines' test sets say who ran them lazily, not who
+            # depends on them: widen to every test that imports the module.
+            out |= ctx.wide(path)
         name = pyscope.def_name(old_lines[d0 - 1]) if d0 - 1 < len(old_lines) else ""
         if name:
             out |= m.names_attr.get(name, 0)
