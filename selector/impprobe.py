@@ -1,4 +1,4 @@
-"""Import probe (run as a child: python -S -E impprobe.py, job as JSON on stdin).
+"""Import probe (run as a child: python -S impprobe.py, job as JSON on stdin).
 
 Imports the patched tree (the overlay of tpcds_core serves the new text of each patched file) the way a whole
 pytest session ends up having it: `import sqlglot`, then every module of the package, then every dialect by name.
@@ -61,6 +61,8 @@ def main():
     import pkgutil
 
     names = sorted(m.name for m in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."))
+    if os.environ.get("IMPPROBE_REVERSE") == "1":  # order-independence check (tests)
+        names.reverse()
     for n in names:
         try:
             __import__(n)

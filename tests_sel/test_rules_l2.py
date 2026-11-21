@@ -42,7 +42,7 @@ def test_plain_constant_selects_its_readers_and_not_tpcds(env):
     assert "L2" in why
     assert num["tests/dialects/test_mysql.py::TestMySQL::test_safe_div"] in got
     assert num[TPCDS] not in got
-    assert len(got) < 200  # T28: the dialect metaclass hook at class creation credits subclasses' modules (60 before)
+    assert len(got) < 60
 
 
 @pytest.mark.parametrize("rel,old_s,new_s", [
@@ -93,3 +93,11 @@ def test_bare_name_derivations_keep_today_s_rule(env, rel, old_s, new_s):
 def test_unhashable_set_member_value_keeps_today_s_rule(env):
     got, why, num = select(env, "sqlglot/dialects/mysql.py", "    SAFE_DIVISION = True\n", "    SAFE_DIVISION = {[]}\n")
     assert "L2" not in why
+
+
+def test_plain_constant_static_fallback_is_wider_but_bounded(env, monkeypatch):
+    """T28: with the import probe off, the dialect metaclass hook credits subclasses' modules (135 tests; 14 with the probe)."""
+    monkeypatch.setenv("BR_NO_PROBE", "1")
+    got, why, num = select(env, "sqlglot/dialects/mysql.py", "    SAFE_DIVISION = True\n", "    SAFE_DIVISION = False\n")
+    assert num["tests/dialects/test_mysql.py::TestMySQL::test_safe_div"] in got
+    assert len(got) < 200

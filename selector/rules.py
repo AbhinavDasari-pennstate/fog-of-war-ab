@@ -138,7 +138,7 @@ class Ctx:
 
         env = {"PYTHONHASHSEED": str(seed), "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp"}
         job = json.dumps({"src": str(self.src), "patched": patched}).encode()
-        r = subprocess.run([_sys.executable, "-S", "-E", os.path.join(os.path.dirname(os.path.abspath(__file__)), "impprobe.py")],
+        r = subprocess.run([_sys.executable, "-S", os.path.join(os.path.dirname(os.path.abspath(__file__)), "impprobe.py")],
                            input=job, capture_output=True, env=env, timeout=float(os.environ.get("BR_PROBE_S", "60")))
         return json.loads(r.stdout.decode().strip().splitlines()[-1])
 

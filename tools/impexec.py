@@ -139,7 +139,7 @@ def main() -> int:
     import subprocess
 
     here = os.path.dirname(os.path.abspath(__file__))
-    r = subprocess.run([sys.executable, "-S", "-E", os.path.join(here, "..", "selector", "impprobe.py")],
+    r = subprocess.run([sys.executable, "-S", os.path.join(here, "..", "selector", "impprobe.py")],
                        input=json.dumps({"src": src, "patched": {}}).encode(), capture_output=True,
                        env={"PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp"})
     pr = json.loads(r.stdout.decode().strip().splitlines()[-1])
