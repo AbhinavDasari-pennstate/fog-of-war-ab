@@ -8,6 +8,7 @@ Stdlib only, never imports sqlglot.
 """
 
 import ast
+import json
 import bisect
 import os
 import re
@@ -54,6 +55,8 @@ class Ctx:
         self.narrow = None  # (start line, mask) of a class-level assignment narrowed by maps/attrreads.bin
         self._attr = None
         self._val = None
+        self.patched = None  # {relpath: new text} of every modified sqlglot module of the patch (set by select), for the import probe
+        self._probe = None  # None: not run; False: unavailable (static widening); else {"mask": bits}
         self.doc_only = False  # every difference of the current file is the text of a string statement (a docstring)
 
     def attr(self):
@@ -90,7 +93,7 @@ class Ctx:
         soft: (first, last) line of the lambda the edit sits in: only that lambda's code can run. Otherwise a class-level edit is
         reached by the methods of the class (or of a subclass) that ran, a module-level one by the functions of the file that ran.
         The module being edited is left out: a change of what its own body does is the business of the class and name maps."""
-        files, classes, ranges, state, base = self.m.impexec
+        files, classes, ranges, state, base, _pinfo = self.m.impexec
         if state == "absent" or self.doc_only:
             return 0
         if state == "bad":
@@ -112,7 +115,64 @@ class Ctx:
                     out |= 1 << t["number"]
         for f in mods:
             out |= self.m.imports.get(f, self.all) | self.m.srcreaders.get(f, 0)
+        if out:  # the static answer is an over-approximation: ask the probe what the patched tree really does at import
+            pm = self.probe_mask()
+            if pm is not None:
+                return pm
         return out
+
+    def probe_mask(self):
+        """Exact answer to "does this patch make an import raise?" (selector/impprobe.py in a child, two hash seeds): the tests that import
+        each module that now raises, plus test_lazy_load when `import sqlglot` loads something else. 0 when nothing changes.
+        None when the probe cannot run or fails (callers keep the static widening)."""
+        if self._probe is None:
+            try:
+                self._probe = self._run_probe() or False
+            except Exception:
+                self._probe = False
+        return self._probe["mask"] if self._probe else None
+
+    def _child(self, patched, seed):
+        import subprocess
+        import sys as _sys
+
+        env = {"PYTHONHASHSEED": str(seed), "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp"}
+        job = json.dumps({"src": str(self.src), "patched": patched}).encode()
+        r = subprocess.run([_sys.executable, "-S", "-E", os.path.join(os.path.dirname(os.path.abspath(__file__)), "impprobe.py")],
+                           input=job, capture_output=True, env=env, timeout=float(os.environ.get("BR_PROBE_S", "60")))
+        return json.loads(r.stdout.decode().strip().splitlines()[-1])
+
+    def _run_probe(self):
+        info = self.m.impexec[5]
+        if not self.patched or info is None or os.environ.get("BR_NO_PROBE") == "1":
+            return None
+        failed = {}
+        first = None
+        for seed in range(int(os.environ.get("BR_PROBE_SEEDS", "2"))):
+            res = self._child(self.patched, seed)
+            first = first or res
+            for n, fs in res["failed"]:
+                failed.setdefault(n, set()).update(fs)
+        base_ok = set(first["base"]) == set(info["base"]) and first["nclasses"] == info["nclasses"]
+        if set(failed) <= set(info["failed"]) and base_ok:
+            return {"mask": 0}
+        pri = self._child({}, 0)  # confirm against this machine's pristine tree
+        pf = {n for n, _ in pri["failed"]}
+        new = {n: fs for n, fs in failed.items() if n not in pf}
+        out = 0
+        for n, fs in new.items():
+            cands = set(fs)
+            rel = n.replace(".", "/")
+            for c in (rel + ".py", rel + "/__init__.py"):
+                if c in self.m.imports or c in self.by_file:
+                    cands.add(c)
+            for c in cands:
+                out |= self.wide(c)
+        if set(first["base"]) != set(pri["base"]) or first["nclasses"] != pri["nclasses"]:
+            for t in self.tests:
+                if t["id"].endswith("test_dialect.py::TestDialect::test_lazy_load"):
+                    out |= 1 << t["number"]
+        return {"mask": out}
 
     def udef(self, path: str, d0: int, d1: int) -> int:
         lm = self.m.lines.get(path)
@@ -616,7 +676,8 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
     is_test = path.startswith("tests/") and os.path.basename(path).startswith("test_")
     out = _py_lines(ctx, path, change, old_text.split("\n"), is_test, soft) | sr
     if path.startswith("sqlglot/") and _own_import_risk(old_tree, new_tree, old_text, diffs, ranges):
-        out |= ctx.wide(path)  # the edit can make this very module raise while it imports: every test that imports it, lazily or not
+        pm = ctx.probe_mask()
+        out |= ctx.wide(path) if pm is None else pm  # the edit can make this very module raise while it imports: every test that imports it, lazily or not
     # A change of what a function binds or resolves (a name made local, a yield, a global, a closure) acts on every
     # line of that function, not only on the line edited: every test that ran any of its lines.
     try:
@@ -656,6 +717,14 @@ def _weak(ctx: Ctx, changes) -> int:
 def select(changes, maps, tests, src_root=None):
     ctx = Ctx(maps, tests, src_root or DEFAULT_SRC)
     ctx.single = len(changes) == 1
+    try:
+        pt = {}
+        for ch in changes:
+            if ch.status == "modified" and ch.path_new == ch.path_old and ch.path_new.startswith("sqlglot/") and ch.path_new.endswith(".py"):
+                pt[ch.path_new] = diffparse.apply((ctx.src / ch.path_new).read_bytes().decode("utf-8"), ch)
+        ctx.patched = pt or None
+    except Exception:
+        ctx.patched = None
     mask = 0
     for ch in changes:
         try:

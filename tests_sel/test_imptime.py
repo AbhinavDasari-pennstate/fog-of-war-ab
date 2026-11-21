@@ -66,7 +66,7 @@ def test_docstring_only_edit_adds_no_import_time_tests(env):
 def test_imptime_skips_the_edited_module_and_reads_the_class_map(env):
     maps, tests, diffparse, rules = env
     ctx = rules.Ctx(maps, tests, PIN)
-    files, classes, ranges, state, base = maps.impexec
+    files, classes, ranges, state, base, pinfo = maps.impexec
     assert state == "ok"
     assert "sqlglot/generators/duckdb.py" in classes["Tokenizer"] or "sqlglot/generators/duckdb.py" in files["sqlglot/tokens.py"]
     with_self = ctx.imptime("sqlglot/dialects/bigquery.py", "")
@@ -77,7 +77,7 @@ def test_damaged_map_widens_to_every_test(env):
     maps, tests, diffparse, rules = env
 
     class Damaged:
-        impexec = ({}, {}, {}, "bad", frozenset())
+        impexec = ({}, {}, {}, "bad", frozenset(), None)
 
     ctx = rules.Ctx(maps, tests, PIN)
     ctx.m = Damaged()
@@ -106,7 +106,8 @@ def test_number_or_bool_constant_inside_a_call_in_a_class_body_does_not_widen(en
     assert len(got) < 200
 
 
-def test_string_constant_inside_a_call_in_a_class_body_widens_to_the_importers(env):
+def test_string_constant_inside_a_call_in_a_class_body_widens_statically_when_the_probe_is_off(env, monkeypatch):
+    monkeypatch.setenv("BR_NO_PROBE", "1")
     maps, tests, diffparse, rules = env
     rel = "sqlglot/parsers/singlestore.py"
     old = (PIN / rel).read_text("utf-8")
@@ -128,3 +129,20 @@ def test_zero_month_in_a_date_call_at_module_scope_selects_every_importer(env):
 def test_class_edit_in_a_module_that_import_sqlglot_loads_selects_test_lazy_load(env):
     got, _, ids = _select(env, "sqlglot/tokens.py", 392, "TokenType.SELECT", "TokenType.SET")
     assert ids["tests/dialects/test_dialect.py::TestDialect::test_lazy_load"] in got
+
+
+def test_probe_clears_a_string_edit_that_imports_fine(env):
+    """T28b: the same string edit, with the import probe on: every module still imports, so nothing is widened."""
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/parsers/singlestore.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace('_show_parser("GROUPS FOR USER", target=True)', '_show_parser("GROUPS FOR USER ", target=True)', 1)
+    got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    assert len(got) < 200
+
+
+def test_probe_failure_falls_back_to_the_static_widening(env, monkeypatch):
+    maps, tests, diffparse, rules = env
+    monkeypatch.setenv("BR_PROBE_S", "0.0001")  # the child cannot finish: timeout
+    got, _, ids = _select(env, "sqlglot/tokens.py", 392, "TokenType.SELECT", "TokenType.SET")
+    assert ids[LAZY] in got

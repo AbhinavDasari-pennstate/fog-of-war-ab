@@ -134,6 +134,17 @@ def main() -> int:
         "base": base,
         "range": {f: sorted((lo, hi, sorted(v)) for (lo, hi), v in d.items()) for f, d in sorted(byrange.items())},
     }
+    # what the selector's import probe (selector/impprobe.py, python -S -E) sees on the pristine tree: it compares a patched run with this
+    import json
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    r = subprocess.run([sys.executable, "-S", "-E", os.path.join(here, "..", "selector", "impprobe.py")],
+                       input=json.dumps({"src": src, "patched": {}}).encode(), capture_output=True,
+                       env={"PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp"})
+    pr = json.loads(r.stdout.decode().strip().splitlines()[-1])
+    out["probe"] = {"base": pr["base"], "nclasses": pr["nclasses"], "failed": sorted(n for n, _ in pr["failed"])}
+    print("probe baseline: failed", out["probe"]["failed"], "nclasses", pr["nclasses"], "base", len(pr["base"]), file=sys.stderr)
     with open(a.out, "wb") as f:
         f.write(zlib.compress(marshal.dumps(out), 9))
     allm = set().union(*byfile.values()) if byfile else set()
