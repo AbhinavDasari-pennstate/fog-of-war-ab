@@ -31,6 +31,8 @@ def main():
     names = set(m.names_attr)
     files = sorted(m.stmts)
     out: dict[str, list[int]] = {}
+    qual: dict[tuple, list[int]] = {}
+    pair = re.compile(r"([A-Za-z_][A-Za-z_0-9]*)\.([A-Za-z_][A-Za-z_0-9]*)")
     fidx = {f: i for i, f in enumerate(files)}
     for f in files:
         if not f.startswith("sqlglot/"):
@@ -44,10 +46,13 @@ def main():
                 if re.match(r"^\s*" + re.escape(tok) + r"\s*(?::|=(?!=))", text):
                     continue
                 out.setdefault(tok, []).append(fidx[f] * 100000 + ln)
-    blob = zlib.compress(marshal.dumps({"files": files, "mentions": out}), 9)
+            for q, tok in set(pair.findall(text)):
+                if tok in names and not re.match(r"^\s*" + re.escape(tok) + r"\s*(?::|=(?!=))", text):
+                    qual.setdefault((q, tok), []).append(fidx[f] * 100000 + ln)
+    blob = zlib.compress(marshal.dumps({"files": files, "mentions": out, "qual": qual}), 9)
     Path(a.maps, "mentions.bin").write_bytes(blob)
     os.chmod(Path(a.maps, "mentions.bin"), 0o644)
-    print(f"{len(out)} names, {sum(map(len, out.values()))} mentions, {len(blob)} bytes")
+    print(f"{len(out)} names, {sum(map(len, out.values()))} mentions, {len(qual)} qualified pairs, {len(blob)} bytes")
 
 
 if __name__ == "__main__":

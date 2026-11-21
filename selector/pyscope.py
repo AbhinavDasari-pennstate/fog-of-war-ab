@@ -75,9 +75,9 @@ def ast_diff(old, new, ranges):
 
     ranges: (lo, hi) old line ranges the patch changed. A subtree of the old tree that does not
     overlap any range has identical text in both files, so it is skipped. Returns a list of
-    (old_node, deferred, hard) where old_node is the old node at which the trees stop agreeing
-    and deferred is True when the difference lies inside a lambda body (runs only when the lambda
-    is called). An empty list means the ASTs agree (comment, blank-line and layout edits).
+    (old_node, lambda_node_or_None) where old_node is the old node at which the trees stop agreeing
+    and the second item is the enclosing Lambda node when the difference lies inside a lambda body
+    (it runs only when the lambda is called). An empty list means the ASTs agree (comment, blank-line and layout edits).
     """
     out = []
 
@@ -103,7 +103,7 @@ def ast_diff(old, new, ranges):
             for field in a._fields:
                 va = getattr(a, field, None)
                 vb = getattr(b, field, None)
-                inner = deferred or (isinstance(a, ast.Lambda) and field == "body")
+                inner = deferred or (a if isinstance(a, ast.Lambda) and field == "body" else None)
                 if isinstance(va, list):
                     if not isinstance(vb, list) or len(va) != len(vb):
                         out.append((a, deferred))
@@ -122,5 +122,5 @@ def ast_diff(old, new, ranges):
             if type(a) is not type(b) or a != b:
                 out.append((parent, deferred))
 
-    walk(old, new, False, old)
+    walk(old, new, None, old)
     return out

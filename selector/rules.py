@@ -118,16 +118,22 @@ def _tokens(texts):
     return {t for t in pyscope.names_in(texts) if t not in STOP and not t.isdigit()}
 
 
-def _mentions(ctx: Ctx, names, in_class: bool) -> int:
-    """Tests that depend on class- or module-level statements that mention a changed name."""
-    files, idx = ctx.m.mentions
+def _mentions(ctx: Ctx, names, cls: str) -> int:
+    """Tests that depend on class- or module-level statements that mention a changed name.
+
+    Inside a class the attribute is reached as Class.name from other statements, so only lines
+    that qualify the name with the class's own name count (every class defines its own
+    arg_types; an unqualified match would select the world)."""
+    files, idx, qual = ctx.m.mentions
+    simple = cls.rsplit(".", 1)[-1] if cls else ""
     out = 0
     for n in names:
-        for code in idx.get(n, ()):
+        codes = qual.get((simple, n), ()) if cls else idx.get(n, ())
+        for code in codes:
             f, ln = files[code // 100000], code % 100000
             s = ctx.m.stmt(f, ln)
-            if s is None or (in_class and s[2] == "function"):
-                continue  # import-time helpers read a class attribute for that class: its users cover it
+            if s is None or (cls and s[2] == "function"):
+                continue
             if s[5]:
                 out |= ctx.m.names_class.get(s[5], 0) or ctx.m.files.get(f, 0)
             else:
@@ -144,10 +150,15 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
     lm = m.lines.get(path, {})
     if soft:
         # the edit sits inside a lambda body: it runs only when the lambda is called, and the tests
-        # that called it are the ones that ran this line in a test context
-        sid = lm.get(ln)
-        if sid:  # unstable lines are unions over fork and non-fork runs, so complete
-            return sets[sid]
+        # that called it are the ones that ran a line of the lambda in a test context (unstable
+        # lines are unions over fork and non-fork runs, so complete)
+        u = 0
+        for l2 in range(soft[0], soft[1] + 1):
+            sid = lm.get(l2)
+            if sid:
+                u |= sets[sid]
+        if u:
+            return u
     # A continuation line of a multi-line class/module statement that never ran at import
     # (a lambda body inside a table) is credited exactly by coverage.
     sid = lm.get(ln)
@@ -166,7 +177,7 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
     diff = set(_tokens(removed_texts)) ^ set(_tokens(added_texts))
     if ln == start and _TARGET.match(first):
         diff.add(_TARGET.match(first).group(1))
-    out |= _mentions(ctx, diff, bool(cls))
+    out |= _mentions(ctx, diff, cls)
     # B: tests that ran a line naming the assigned attribute or a changed name or key. Not an
     # upper bound: class attributes are often read once at class creation (metaclass), so a
     # class-level change selects every test that uses the class or a subclass.
@@ -201,7 +212,7 @@ def _func_level(ctx: Ctx, path: str, s) -> int:
     return out
 
 
-def _py_lines(ctx: Ctx, path: str, change, old_lines, is_test_file: bool, soft=lambda ln: False) -> int:
+def _py_lines(ctx: Ctx, path: str, change, old_lines, is_test_file: bool, soft=lambda ln: None) -> int:
     m = ctx.m
     out = 0
     if m.stmts.get(path) is None:
@@ -305,10 +316,19 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
     for node, deferred in diffs:
         lo = getattr(node, "lineno", None)
         rng = (lo, getattr(node, "end_lineno", lo) or lo) if lo is not None else (0, 1 << 30)
-        (soft_r if deferred else hard).append(rng)
+        if deferred is None:
+            hard.append(rng)
+        else:
+            soft_r.append((rng, (deferred.lineno, deferred.end_lineno or deferred.lineno)))
 
     def soft(ln):
-        return (any(a <= ln <= b for a, b in soft_r) and not any(a <= ln <= b for a, b in hard))
+        """The line range of the lambda the edit sits in, when every edit on this line does."""
+        if any(a <= ln <= b for a, b in hard):
+            return None
+        spans = [lam for (a, b), lam in soft_r if a <= ln <= b]
+        if not spans:
+            return None
+        return (min(a for a, _ in spans), max(b for _, b in spans))
 
     is_test = path.startswith("tests/") and os.path.basename(path).startswith("test_")
     out = _py_lines(ctx, path, change, old_text.split("\n"), is_test, soft) | sr

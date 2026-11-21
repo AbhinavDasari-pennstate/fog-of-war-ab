@@ -85,15 +85,15 @@ class Maps:
 
     @property
     def mentions(self):
-        """(files, {name: [file_index * 100000 + line]}): class- and module-level lines of sqlglot/ that
+        """(files, {name: [file_index * 100000 + line]}, {(qualifier, name): [...]}): class- and module-level lines of sqlglot/ that
         mention a name defined at class or module level (its own definitions excluded)."""
         if self._mentions is None:
             p = os.path.join(self.dir, "mentions.bin")
             if os.path.exists(p):
                 d = _read(self.dir, "mentions.bin")
-                self._mentions = (d["files"], d["mentions"])
+                self._mentions = (d["files"], d["mentions"], d["qual"])
             else:
-                self._mentions = ([], {})
+                self._mentions = ([], {}, {})
         return self._mentions
 
     def mask(self, set_id: int) -> int:
