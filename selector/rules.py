@@ -560,6 +560,53 @@ def _data_file(ctx: Ctx, path: str, change) -> tuple[int, str]:
     return out, f"{'R2' if path.startswith('tests/') else 'R1'} {path}"
 
 
+# Where a def's signature can be inspected, a default value could in principle be read. grep of the pinned
+# sqlglot/ and tests/ finds no read of __defaults__, __kwdefaults__ or Parameter.default; the only inspect calls are
+#   sqlglot/optimizer/optimizer.py:111  inspect.getfullargspec(rule).args           every rule handed to optimize()
+#   sqlglot/executor/env.py:101         inspect.signature(func).parameters          defs under @null_if_any(...)
+# and both use parameter names only. tests/test_typing.py compares __code__ of the annotators in sqlglot/typing (a nested
+# def's default sits in the enclosing function's co_consts); those files are source readers (R7b), selected anyway.
+# A def that those calls can reach keeps the wider rule, so a later read of defaults cannot be missed: every def under
+# sqlglot/optimizer/ (any module-level def may be passed as a rule) and every def in executor/env.py.
+_SIGNATURE_READ = ("sqlglot/optimizer/", "sqlglot/executor/env.py")
+
+
+def _nested_defs(tree) -> set:
+    """ids of the defs that sit inside another def (their defaults are constants of the enclosing function's code)."""
+    out = set()
+    stack = [(tree, False)]
+    while stack:
+        node, inside = stack.pop()
+        for ch in ast.iter_child_nodes(node):
+            func = isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+            if func and inside and not isinstance(ch, ast.Lambda):
+                out.add(id(ch))
+            stack.append((ch, inside or func))
+    return out
+
+
+def _never_ran(ctx: Ctx, path: str, fn, nested: set) -> bool:
+    """P3: True when it is proven that no test could have run the body of `fn`, so no call reads its defaults.
+
+    The proof is the absence of every kind of record on the body lines (a test line, an import-time line, an
+    unstable line: any of them means something ran or may run it), in a file that has line data at all, for a
+    body made of statements coverage always records (a docstring or `...` leaves no line event), in a def that is
+    not nested in another def and that nothing inspects (see _SIGNATURE_READ). Only sqlglot/ source: a test
+    file's defs are run by the suite itself."""
+    if not path.startswith("sqlglot/") or path.startswith(_SIGNATURE_READ) or id(fn) in nested:
+        return False
+    m = ctx.m
+    lm = m.lines.get(path)
+    if not lm:
+        return False
+    lines = range(fn.body[0].lineno, fn.end_lineno + 1)
+    il = m.importtime.get(path, ())
+    un = m.unstable.get(path, ())
+    if any(ln in lm or ln in il or ln in un for ln in lines):
+        return False
+    return any(not (isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant)) for st in fn.body)
+
+
 def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree, ranges):
     """Tests that depend on an edit that only changes literal default values of defs, or None when the
     edit is anything else (or the evidence is thin). A literal default is read only when a call leaves
@@ -567,8 +614,10 @@ def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree, ranges):
     changed def's body. The header lines (decorators, signature) run at import for every importer and
     say nothing about who calls. Nothing in sqlglot or its tests reads defaults by introspection
     (inspect.getfullargspec(rule).args and inspect.signature(func).parameters read names only).
-    A body line that ran at import widens to every importer, as for any def; a def whose body no test ran
-    keeps the older, wider rule."""
+    A body line that ran at import widens to every importer, as for any def. A def whose body no test ran
+    selects nothing when _never_ran proves that (no record of any kind for its body lines, a body coverage
+    would have recorded, nothing that can read a default); any other def whose body no test ran keeps the
+    older, wider rule (None)."""
     if not diffs or not all(d is None and isinstance(n, (ast.Constant, ast.UnaryOp, ast.arguments)) for n, d in diffs):
         return None
     # cheap screen: every difference must sit inside the argument list of a def the edit touched
@@ -591,11 +640,17 @@ def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree, ranges):
         return None
     il = ctx.m.importtime.get(path, ())
     out = 0
+    nested = None
     for fn in fns:
         lo, hi = fn.body[0].lineno, fn.end_lineno
         u = ctx.udef(path, lo, hi)
         if not u:
-            return None
+            if nested is None:
+                nested = _nested_defs(old_tree)
+            if not _never_ran(ctx, path, fn, nested):
+                return None
+            ctx.note(f"P3 {path}:{lo}: no test ran the body of {fn.name}, its literal defaults are never read")
+            continue
         out |= u
         if any(ln in il for ln in range(lo, hi + 1)):
             out |= ctx.wide(path)
