@@ -1,0 +1,41 @@
+maps v1
+sqlglot pinned: eb11aec4be8cb2122afe713a4816662c3f0fb2fa
+tests in tests.json: 1620
+tests with a run context in the instrumented run: 1620 of 1620
+runs merged (union of test sets per line): 6
+distinct sets: 13065
+unstable lines (test set differs between runs): 7234 in 72 files
+files with line data: 247; covered lines: 98609
+sizes (bytes): lines.bin=243453, sets.bin=345348, files.bin=2226, classes.bin=10749, reads.bin=776, names.bin=62342, srcreaders.bin=194, imports.bin=1501, stmts.bin=234516, ids.bin=14816, unstable.bin=9011, importtime.bin=31586
+total bytes: 956518
+flaky tests (differing outcome across 3 clean runs): 0
+tests failing in all clean runs on this machine: 0
+tests with empty coverage (own run context ran no line under sqlglot/): 4
+  empty tests/test_sqlglotc.py::TestSQLGlotC::test_build_removes_obsolete_extensions
+  empty tests/test_sqlglotc.py::TestSQLGlotC::test_dry_run_preserves_obsolete_extensions
+  empty tests/test_sqlglotc.py::TestSQLGlotC::test_editable_install_removes_obsolete_extensions
+  empty tests/test_typing.py::TestTyping::test_no_redundant_expression_metadata
+  why empty: the three test_sqlglotc.py tests run mocked build commands on sqlglotc/ files and execute no sqlglot line
+  (their only dependency is sqlglotc/*, recorded in srcreaders.bin); test_no_redundant_expression_metadata reads the text of
+  sqlglot/typing/*.py and compares lambda bytecode of the already imported modules (recorded in srcreaders.bin, rule R7b).
+coverage contexts whose test is not in tests.json: 1
+  unmapped tests/dialects/test_sqlite.py::TestSQLite::test_variadic_iif_execution
+
+--- build record (Fri Nov 20 2026) ---
+native python -VV: Python 3.13.7 (main, Aug 14 2025, 11:12:11) [Clang 17.0.0 (clang-1700.0.13.3)]   (macOS arm64, M2)
+amd64 python -VV:  Python 3.13.18 (main, Nov  5 2026, 07:59:38) [GCC 14.2.0]   (kit image digest e48f59cd..., linux/amd64 under Docker Desktop emulation)
+coverage 7.17.4 with the ctrace core (COVERAGE_CORE=ctrace), pytest 9.2.0, xdist 3.8.0 from tools/requirements.lock, SKIP_INTEGRATION=0.
+Runs merged into these maps (union of test sets per line): native non-fork -n 6 and -n 3, native fork-per-test -n 6 twice, amd64 non-fork -n 4, amd64 fork-per-test -n 4.
+Fork mode (tools/forkrun.py) runs each test, class fixtures included, in a forked child of a preimported parent, so lazily cached state is credited to every test that needs it.
+Fork mode determinism: two native fork runs gave identical line maps (98602 of 98602 lines), identical reads, srcreaders, files, classes, names and imports.
+Native vs amd64 (both fork mode): 98574 of 98602 lines identical, 19 lines where amd64 has more tests, 9 lines present in only one, 0 lines where native has tests amd64 lacks.
+Tests collected: 1620 numbered tests in both; pytest ran 1621 items natively (the extra one is test_variadic_iif_execution, which tests.json lists as skipped; it skips in the image).
+amd64 baseline: 5 SUBFAILED subtests at the pinned commit with no patch applied, identical in all three amd64 runs: test_optimize (recursive cte),
+test_qualify_columns (3 "(execute)" recursive CTE cases), test_qualify_struct_star_source_types (1 recursive CTE case). They pass natively.
+Likely DuckDB under emulation; the labeller must not trust a failure that also fails at baseline in the image.
+Flakiness: 3 plain native runs gave identical outcomes (flaky.txt is empty); the 3 amd64 instrumented runs also agreed with each other.
+Files used as data are recorded in reads.bin, including the directories build, lib, optimizer and sqlglot that tests/test_sqlglotc.py opens (harmless).
+sqlglot/__init__.py is imported by 1617 of the 1620 tests (the three test_sqlglotc.py tests import no sqlglot).
+Lines in importtime.bin ran at import or collection time: their test set says who executed them lazily, not who depends on them. Use names/classes/files for those lines.
+Lines in unstable.bin had a different test set in two of the runs (lazy or cached state): treat their test set as a lower bound.
+Rebuild: bash tools/run_instrumented.sh instr <src> <dir> (FORK mode: MAPS_FORK=1 and -p tools.forkrun, see Makefile maps target), then python tools/build_maps.py build --run <dirs...>.

@@ -1,0 +1,3 @@
+# Map-build environment only (never in the scorer run path). On top of tools/requirements.lock.
+coverage==7.17.4
+# pytest-cov is not used: tools/covctx.py drives coverage.py directly (pytest-cov 7.1 cannot combine an xdist run with an empty controller file).
