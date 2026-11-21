@@ -12,7 +12,10 @@ import ast
 import json
 import os
 import re
+import subprocess
 import sys
+import time
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -116,17 +119,130 @@ def _load_maps(tests: list[dict]):
         return None
 
 
+TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+# Run-time replay budgets (3 min batch limit, CPU is scored): wall and CPU the replays may use in all.
+REPLAY_WALL_S = float(os.environ.get("BR_REPLAY_WALL", "90"))
+REPLAY_CPU_S = float(os.environ.get("BR_REPLAY_CPU", "70"))
+REPLAY_PER_COMMIT_S = float(os.environ.get("BR_REPLAY_COMMIT", "24"))
+# The replay must cost clearly less than the giant it replaces (build-machine seconds x slack).
+REPLAY_SLACK = 1.3
+REPLAY_OVERHEAD_S = 1.2
+
+
+def _tpcds_candidate(patch_text: str, src_root: Path, tests: list[dict], maps, chosen, tp):
+    """(Scope, patched files) when the TPC-DS giant is in `chosen` only for changes the replay can judge."""
+    import rules
+    import tpcds_scope
+
+    num = next((t["number"] for t in tests if t["id"] == TPCDS_ID), None)
+    if num is None or num not in chosen or tp is None:
+        return None
+    changes = diffparse.parse(patch_text)
+    ctx = rules.Ctx(maps, tests, src_root)
+    per_file, patched = [], {}
+    for ch in changes:
+        try:
+            got, _ = rules._one(ctx, ch)
+            depends = bool(got >> num & 1)
+        except Exception:  # the rules widen on any doubt
+            depends = True
+        per_file.append((ch, depends))
+        if ch.status == "modified" and ch.path_new == ch.path_old and ch.path_new.startswith("sqlglot/") and ch.path_new.endswith(".py"):
+            old = (src_root / ch.path_new).read_bytes().decode("utf-8")
+            patched[ch.path_new] = diffparse.apply(old, ch)
+    sc = tpcds_scope.scope(per_file, tp, src_root)
+    return num, sc, patched
+
+
+def _run_replay(plan, patched, src_root: Path, timeout: float, seed: int):
+    """Spawn the replay child; True only when it reports every replayed query identical."""
+    job = {"src": str(src_root), "patched": patched, "plan": {str(q): st for q, st in plan.items()},
+           "map": str(MAPS_ROOT / "tpcds.z")}
+    env = {"PYTHONHASHSEED": str(seed), "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp"}
+    try:
+        r = subprocess.run([sys.executable, "-S", "-E", str(Path(__file__).resolve().parent / "tpcds_replay.py")],
+                           input=json.dumps(job).encode(), capture_output=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, "replay timed out"
+    try:
+        out = json.loads(r.stdout.decode().strip().splitlines()[-1])
+        return bool(out["same"]), out["why"]
+    except Exception:
+        return False, f"replay child failed (exit {r.returncode})"
+
+
+MAPS_ROOT = Path(os.environ.get("BR_MAPS", str(Path(__file__).resolve().parent.parent / "maps")))
+
+
+def _load_tpcds():
+    try:
+        import tpcds_scope
+
+        return tpcds_scope.TpcdsMap.load(MAPS_ROOT / "tpcds.z")
+    except Exception as exc:
+        print(f"tpcds map unavailable ({type(exc).__name__}: {exc}): giant stays", file=sys.stderr)
+        return None
+
+
 def main(data: Path = DATA, src_root: Path = SRC) -> None:
     tests = json.loads((data / "tests.json").read_text(encoding="utf-8"))["tests"]
     maps = _load_maps(tests)
+    tp = _load_tpcds() if maps is not None and os.environ.get("BR_NO_REPLAY") != "1" else None
+    dur = {t["number"]: round(t["seconds"] * 1000 + 1e-9) for t in tests}
+    rows: dict[str, list] = {}
+    pending = []  # (estimated cost, commit, num, scope, patched, chosen)
     for patch in sorted((data / "commits").glob("*.patch")):
         print(f"{patch.stem}:", file=sys.stderr)
+        text = patch.read_bytes().decode("utf-8")
         try:
-            workers = decide(patch.read_bytes().decode("utf-8"), src_root, tests, maps)
+            workers = decide(text, src_root, tests, maps)
         except Exception as exc:  # one full-suite line per commit, whatever happens
             print(f"  fallback to all tests: {type(exc).__name__}: {exc}", file=sys.stderr)
             workers = _full(tests)
-        print(json.dumps({"commit": patch.stem, "workers": workers}))
+        rows[patch.stem] = workers
+        if tp is not None and workers:
+            try:
+                chosen = {n for w in workers for n in w}
+                cand = _tpcds_candidate(text, src_root, tests, maps, chosen, tp)
+                if cand is not None:
+                    num, sc, patched = cand
+                    print(f"  tpcds: {sc.kind} {sc.why[:200]}", file=sys.stderr)
+                    if sc.kind == "replay":
+                        est = tp.cost(sc.plan) * REPLAY_SLACK + (REPLAY_OVERHEAD_S if sc.plan else 0.0)
+                        pending.append((est, patch.stem, num, sc, patched, chosen))
+            except Exception as exc:
+                print(f"  tpcds refine failed ({type(exc).__name__}: {exc}): giant stays", file=sys.stderr)
+    # replays, cheapest first, inside the batch budgets
+    wall0 = time.monotonic()
+    cpu_used = 0.0
+    import resource
+
+    base_cpu = lambda: (lambda r: r.ru_utime + r.ru_stime)(resource.getrusage(resource.RUSAGE_CHILDREN))  # noqa: E731
+    cpu0 = base_cpu()
+    pending.sort(key=lambda x: (x[0], x[1]))
+    for est, commit, num, sc, patched, chosen in pending:
+        gain = dur[num] / 1000.0
+        if est > gain * 0.8:
+            print(f"{commit}: tpcds replay est {est:.1f}s vs giant {gain:.1f}s: giant stays", file=sys.stderr)
+            continue
+        if not sc.plan:
+            ok, why = True, "no query reaches the changed code"
+        else:
+            left_wall = REPLAY_WALL_S - (time.monotonic() - wall0)
+            left_cpu = REPLAY_CPU_S - (base_cpu() - cpu0)
+            if left_wall < est or left_cpu < est:
+                print(f"{commit}: tpcds replay budget spent: giant stays", file=sys.stderr)
+                continue
+            seed = zlib.crc32(commit.encode()) % 8
+            c0, w0 = base_cpu(), time.monotonic()
+            ok, why = _run_replay(sc.plan, patched, src_root, min(REPLAY_PER_COMMIT_S, left_wall), seed)
+            why += f"; {len(sc.plan)} queries, est {est:.1f}s, cpu {base_cpu() - c0:.1f}s, wall {time.monotonic() - w0:.1f}s"
+        print(f"{commit}: tpcds replay {'identical: giant dropped' if ok else 'giant stays'} ({why})", file=sys.stderr)
+        if ok:
+            chosen2 = chosen - {num}
+            rows[commit] = _pack(chosen2, tests)
+    for commit in sorted(rows):
+        print(json.dumps({"commit": commit, "workers": rows[commit]}))
     print(f"v0 done: {len(tests)} tests known", file=sys.stderr)
 
 
