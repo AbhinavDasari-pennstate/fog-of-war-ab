@@ -59,3 +59,16 @@ numbered after the first test that sees a changed value, because test numbers ar
 --- seqcredit.bin (T24 hardening) ---
 tools/seqcredit.py: 1476 lines in 44 files that every earlier run had import-only (present with an empty test set) and the sequential or post-clear pass
 credited to the first importer. selector/rules.py ignores them when it takes the line-coverage union of an edited lambda body (synth-dev-1-0096 narrowed from 30 tests to 1).
+
+--- valreads.bin (T27) ---
+Value-level read map for dict constants: maps module-level and class-level `NAME = {...}` statements (dict display, explicit keys that are
+constants or name/attribute chains with distinct labels, `**spread` entries allowed) to the tests that read each ENTRY VALUE.
+Recorder: tools/run_valmap.sh (tools/valmap_site + tools/vmfork.py, fork per test like the attribute map), 3 hash seeds (0, 1, 2); builder tools/build_valmap.py.
+The dict is replaced by a RecDict (dict subclass, tools/valmap_site/vm_runtime.py) that records d[k], get, pop, setdefault per key and items, values, copy, ==, repr,
+|, popitem, copy.copy, deepcopy, pickle as a bulk read; __iter__ is overridden so dict(d), {**d}, update(d), f(**d) take CPython's slow path (keys() then __getitem__)
+instead of reading the storage directly. A read while a module or class body runs, or outside any test, makes the entry "derived" (selector keeps today's rule).
+Readers that differ between seeds are derived too. Tests that failed while recording, or never started, are always selected (unrecorded).
+arg_types sites ("req"): the values are read in bulk only by Expr.__init_subclass__ (required_args = {k for k, v in cls.arg_types.items() if v}); required_args is read
+only by Expression.error_messages (core.py:1322). Expression.error_messages is wrapped during recording to log "M:<key>" for every validated instance with no value
+for a key of its class's arg_types; a bool flip of an entry adds the tests that logged that key, a change that keeps bool(value) adds nothing.
+Selector side: selector/valrule.py, rule "V" in rules.py (_one, before L2).
