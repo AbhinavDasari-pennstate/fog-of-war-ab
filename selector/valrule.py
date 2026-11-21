@@ -68,12 +68,11 @@ def site_nodes(tree):
 
 
 def set_eligible(v) -> bool:
-    """A set display of at least one string constant, no repeats."""
+    """A set display of at least one string constant."""
     if not isinstance(v, ast.Set) or not v.elts:
         return False
-    if not all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in v.elts):
-        return False
-    return len({e.value for e in v.elts}) == len(v.elts)
+    # repeated words are fine: an edit is judged by the lookups of the old and the new word, whatever else the set holds
+    return all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in v.elts)
 
 
 def set_nodes(tree):

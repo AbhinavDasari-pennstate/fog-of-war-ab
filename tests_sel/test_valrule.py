@@ -330,11 +330,11 @@ def test_set_word_rename_names_both_words():
 
 def test_set_edit_outside_eligible_sets_does_not_qualify():
     assert set_run(SET_OLD, SET_OLD.replace("{1, 2}", "{1, 3}")) is None
-    assert set_run(SET_OLD, SET_OLD.replace('"a", "a"', '"a", "b"')) is None
+    assert set_run(SET_OLD, SET_OLD.replace('"a", "a"', '"a", "b"')) == [(7, ["'a'", "'b'"])]
 
 
 def test_set_sites():
-    assert [(s.lineno, q, n) for s, q, n in valrule.set_nodes(ast.parse(SET_OLD))] == [(2, "", "A"), (5, "G", "RESERVED")]
+    assert [(s.lineno, q, n) for s, q, n in valrule.set_nodes(ast.parse(SET_OLD))] == [(2, "", "A"), (5, "G", "RESERVED"), (7, "G", "DUP")]
 
 
 def test_set_readers(tmp_path):
