@@ -59,8 +59,26 @@ class TpcdsMap:
         self.unstable = set(raw["unstable"])
 
     table_cpu: dict = {}
-    lambda_called = None  # {"path:line"} of lambdas called outside a query (maps/tpcds_lambdas.json); None = unknown
-    lambda_q: dict = {}  # "path:line" -> {query: {stages}} of lambdas called inside a query
+    _lam = None  # (called outside a query, {"path:line": {query: {stages}}}) from maps/tpcds_lambdas.json, loaded when a lambda needs it
+
+    def lambdas(self):
+        """({"path:line"} of lambdas called outside a query, {"path:line": {query: {stages}}}), or (None, {}) when the
+        file is missing or unreadable (every lambda edit is then an import-time edit)."""
+        if self._lam is None:
+            import os
+
+            try:
+                with open(os.path.join(self.dir, "tpcds_lambdas.json")) as f:
+                    lam = json.load(f)
+                by = {}
+                for q, stages in lam["q"].items():
+                    for st, keys in stages.items():
+                        for k in keys:
+                            by.setdefault(k, {}).setdefault(int(q), set()).add(st)
+                self._lam = (set(lam["called"]), by)
+            except (OSError, ValueError, KeyError):
+                self._lam = (None, {})
+        return self._lam
 
     @classmethod
     def load(cls, path) -> "TpcdsMap":
@@ -73,17 +91,7 @@ class TpcdsMap:
                 m.table_cpu = json.load(f)
         except OSError:
             pass
-        try:
-            with open(os.path.join(os.path.dirname(path), "tpcds_lambdas.json")) as f:
-                lam = json.load(f)
-            m.lambda_called = set(lam["called"])
-            m.lambda_q = {}
-            for q, stages in lam["q"].items():
-                for st, keys in stages.items():
-                    for k in keys:
-                        m.lambda_q.setdefault(k, {}).setdefault(int(q), set()).add(st)
-        except (OSError, ValueError, KeyError):
-            m.lambda_called = None
+        m.dir = os.path.dirname(path)
         return m
 
     FIXED_S = 0.30  # interpreter, map, import of every module, fixture parse, one fork
@@ -250,11 +258,12 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
             # lambda, so the calls are recorded by tools/tpcds_lambdas.py (per query and stage, plus the
             # calls outside any query: those make an edit an import-time edit).
             lk = f"{path}:{node.lineno}"
-            if tp.lambda_called is None or lk in tp.lambda_called:
+            called, by_lambda = tp.lambdas()
+            if called is None or lk in called:
                 return None, f"{path}:{key[0]}: import-time edit (a lambda called at import or in setUpClass, or not recorded)"
-            for q, sts in tp.lambda_q.get(lk, {}).items():
+            for q, sts in by_lambda.get(lk, {}).items():
                 plan.setdefault(q, set()).update(sts)
-            notes.append(f"{key[0]} lambda {len(tp.lambda_q.get(lk, {}))}q")
+            notes.append(f"{key[0]} lambda {len(by_lambda.get(lk, {}))}q")
             continue
         span_lo = min([node.lineno] + [d.lineno for d in node.decorator_list])
         span_hi = node.end_lineno

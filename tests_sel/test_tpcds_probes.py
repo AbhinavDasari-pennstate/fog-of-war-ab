@@ -201,5 +201,6 @@ def test_lambda_called_at_import_is_an_import_time_edit():
     import tpcds_scope
 
     tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
-    assert tp.lambda_called and any(k.startswith("sqlglot/parser.py:") for k in tp.lambda_called)
-    assert any(k.startswith("sqlglot/generators/python.py:") for k in tp.lambda_q)
+    called, by_lambda = tp.lambdas()
+    assert called and any(k.startswith("sqlglot/parser.py:") for k in called)
+    assert any(k.startswith("sqlglot/generators/python.py:") for k in by_lambda)

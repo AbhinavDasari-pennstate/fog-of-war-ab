@@ -321,7 +321,7 @@ def _data_file(ctx: Ctx, path: str, change) -> tuple[int, str]:
     return out, f"{'R2' if path.startswith('tests/') else 'R1'} {path}"
 
 
-def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree):
+def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree, ranges):
     """Tests that depend on an edit that only changes literal default values of defs, or None when the
     edit is anything else (or the evidence is thin). A literal default is read only when a call leaves
     the parameter out, and the call then runs the body: the tests are those that ran a line of a
@@ -331,6 +331,21 @@ def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree):
     A body line that ran at import widens to every importer, as for any def; a def whose body no test ran
     keeps the older, wider rule."""
     if not diffs or not all(d is None and isinstance(n, (ast.Constant, ast.UnaryOp, ast.arguments)) for n, d in diffs):
+        return None
+    # cheap screen: every difference must sit inside the argument list of a def the edit touched
+    under = set()
+    stack = [old_tree]
+    while stack:
+        node = stack.pop()
+        for ch in ast.iter_child_nodes(node):
+            if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                lo = min([ch.lineno] + [d.lineno for d in ch.decorator_list])
+                if any(a <= ch.end_lineno and lo <= b for a, b in ranges):
+                    under.update(id(x) for x in ast.walk(ch.args))
+                    stack.append(ch)
+            elif isinstance(ch, (ast.ClassDef, ast.If, ast.Try, ast.With, ast.For, ast.While)):
+                stack.append(ch)
+    if not all(id(n) in under for n, _ in diffs):
         return None
     fns = pyscope.default_only(old_tree, new_tree)
     if not fns:
@@ -390,7 +405,7 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
         return sr, f"R4 {path}: ast unchanged" + (" (source readers)" if sr else "")
     if not pyscope.compiles(new_tree, path):
         return ctx.wide(path) | sr, f"R3 {path}: does not compile"
-    got = _defaults_only(ctx, path, diffs, old_tree, new_tree)
+    got = _defaults_only(ctx, path, diffs, old_tree, new_tree, ranges)
     if got is not None:
         return got | sr, f"R6/R7 {path}: literal default values only"
     ctx.narrow = None
