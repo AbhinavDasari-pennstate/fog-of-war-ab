@@ -193,14 +193,15 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
     pending = []  # (estimated cost, commit, num, scope, patched, chosen)
     for patch in sorted((data / "commits").glob("*.patch")):
         print(f"{patch.stem}:", file=sys.stderr)
-        text = patch.read_bytes().decode("utf-8")
+        text = None
         try:
+            text = patch.read_bytes().decode("utf-8")
             workers = decide(text, src_root, tests, maps)
         except Exception as exc:  # one full-suite line per commit, whatever happens
             print(f"  fallback to all tests: {type(exc).__name__}: {exc}", file=sys.stderr)
             workers = _full(tests)
         rows[patch.stem] = workers
-        if tp is not None and workers:
+        if tp is not None and workers and text is not None:
             try:
                 chosen = {n for w in workers for n in w}
                 cand = _tpcds_candidate(text, src_root, tests, maps, chosen, tp)

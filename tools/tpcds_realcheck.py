@@ -24,7 +24,7 @@ def main():
         dst = os.path.join(tmp, "tree")
         shutil.copytree(src, dst, ignore=shutil.ignore_patterns(".git", "__pycache__", ".venv"))
         for cid in ids:
-            patch = os.path.abspath(os.path.join(cdir, cid + ".patch"))
+            patch = os.path.abspath(os.path.join(cdir, "commits", cid + ".patch"))
             r = subprocess.run(["patch", "-p1", "-s", "--no-backup-if-mismatch", "-i", patch], cwd=dst, capture_output=True, text=True)
             if r.returncode:
                 print(cid, "NOAPPLY", r.stdout[-200:], flush=True)

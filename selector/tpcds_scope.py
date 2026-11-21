@@ -26,6 +26,7 @@ import zlib
 from dataclasses import dataclass
 
 import diffparse
+import pyscope
 
 _COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try,
              ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Match)
@@ -64,11 +65,11 @@ class TpcdsMap:
 
     def cost(self, plan: dict) -> float:
         """Seconds the replay takes (build-machine measurement): the stages each query has to run.
-        Stage P always runs; E needs O's work; T is independent."""
+        Stage P always runs; O or E means the executor runs to the end (O, E); T is independent."""
         total = 0.0
         for i, st in plan.items():
             sc = self.q[i]["stage_cpu"]
-            need = {"P"} | set(st) | ({"O"} if "E" in st else set())
+            need = {"P"} | set(st) | ({"O", "E"} if set(st) & {"O", "E"} else set())
             total += sum(sc.get(x, 0.0) for x in need)
         return total
 
@@ -93,10 +94,14 @@ def _units(tree):
     return out
 
 
+_bind_sig = pyscope.bind_sig
+
+
 def _shell_and_units(tree):
-    """({key: dump of the whole function}, dump of the module with function bodies blanked)."""
+    """({key: (dump of the whole function, its binding set)}, dump of the module with function
+    bodies blanked)."""
     units = _units(tree)
-    dumps = {key: ast.dump(node) for key, node in units}
+    dumps = {key: (ast.dump(node), _bind_sig(node)) for key, node in units}
     for _, node in units:
         node.body = [ast.Pass()]
     return dumps, ast.dump(tree)
@@ -169,7 +174,8 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
         return f"{path}: module or class level, a def header or a decorator changed"
     if set(old_d) != set(new_d):
         return f"{path}: functions added or removed"
-    changed = [k for k in old_d if old_d[k] != new_d[k]]
+    changed = [k for k in old_d if old_d[k][0] != new_d[k][0]]
+    rebinds = {k for k in changed if old_d[k][1] != new_d[k][1]}
     if not changed:
         return {}, f"{path}: AST of every function unchanged"
     # old_tree bodies were blanked by _shell_and_units: reparse for the statement lookups
@@ -207,14 +213,26 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
                 lines.update(got)
             if not narrow:
                 break
+        if key in rebinds:
+            narrow = False
+        whole = set(range(body_lo, span_hi + 1))
+
+        def reach(ls):
+            m4 = [0, 0, 0, 0]
+            for ln in ls:
+                for si, v in enumerate(cov.get(ln, (0, 0, 0, 0))):
+                    m4[si] |= v
+            return m4
+
         if not narrow:
-            lines = set(range(body_lo, span_hi + 1))
+            lines = whole
+        ms = reach(lines)
+        if narrow and not any(ms):  # the changed statements were never reached: whoever ran the function decides
+            narrow = False
+            lines = whole
+            ms = reach(lines)
         if lines & base:
             return f"{path}:{key[0]}: changed code also runs at import or in setUpClass"
-        ms = [0, 0, 0, 0]
-        for ln in lines:
-            for si, v in enumerate(cov.get(ln, (0, 0, 0, 0))):
-                ms[si] |= v
         for si, v in enumerate(ms):
             q = 0
             while v:

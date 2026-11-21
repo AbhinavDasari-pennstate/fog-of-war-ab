@@ -124,3 +124,64 @@ def ast_diff(old, new, ranges):
 
     walk(old, new, None, old)
     return out
+
+
+_FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def bind_sig(node) -> frozenset:
+    """Everything a function (and what it contains) can bind, plus yield and await. Making a name
+    local anywhere in a function changes every read of it there (UnboundLocalError); a yield turns
+    the function into a generator. Neither is local to the line that holds it."""
+    names = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            names.add(n.id)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            names.update(type(n).__name__ + ":" + x for x in n.names)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            names.update((a.asname or a.name).split(".")[0] for a in n.names)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(n.name)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            names.add(n.name)
+        elif isinstance(n, ast.arg):
+            names.add(n.arg)
+        elif isinstance(n, (ast.Yield, ast.YieldFrom, ast.Await)):
+            names.add("<" + type(n).__name__ + ">")
+        else:
+            for attr in ("name", "rest"):
+                v = getattr(n, attr, None)
+                if isinstance(v, str) and type(n).__name__.startswith("Match"):
+                    names.add(v)
+    return frozenset(names)
+
+
+def units(tree):
+    """Outermost function defs in source order, keyed (qualified name, ordinal)."""
+    out, counts = [], {}
+
+    def walk(node, prefix):
+        for ch in ast.iter_child_nodes(node):
+            if isinstance(ch, _FUNCS):
+                q = prefix + ch.name
+                k = counts.get(q, 0)
+                counts[q] = k + 1
+                out.append(((q, k), ch))
+            elif isinstance(ch, ast.ClassDef):
+                walk(ch, prefix + ch.name + ".")
+            else:
+                walk(ch, prefix)
+
+    walk(tree, "")
+    return out
+
+
+def rebound_spans(old_tree, new_tree) -> list:
+    """Old-file line spans (lo, hi) of functions whose binding set changed."""
+    new = {k: bind_sig(n) for k, n in units(new_tree)}
+    out = []
+    for k, n in units(old_tree):
+        if k in new and new[k] != bind_sig(n):
+            out.append((min([n.lineno] + [d.lineno for d in n.decorator_list]), n.end_lineno))
+    return out

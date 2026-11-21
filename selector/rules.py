@@ -356,6 +356,10 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
 
     is_test = path.startswith("tests/") and os.path.basename(path).startswith("test_")
     out = _py_lines(ctx, path, change, old_text.split("\n"), is_test, soft) | sr
+    # A change of what a function binds (a name made local, a yield, a global) acts on every line of
+    # that function, not only on the line edited: every test that ran any of its lines.
+    for lo, hi in pyscope.rebound_spans(old_tree, new_tree):
+        out |= ctx.udef(path, lo, hi)
     return out, f"R6/R7 {path}"
 
 

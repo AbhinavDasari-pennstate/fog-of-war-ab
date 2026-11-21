@@ -82,8 +82,10 @@ def _judge(q, e, meta, sql, schema, tables, want, job):
         return False, f"query {q}: {out['error']}"
     if not out["ok"]:
         return False, f"query {q}: shared tables or schema changed"
-    if "O" in out and "E" not in out and out["O"] not in e["O"]:
-        return False, f"query {q}: optimized tree differs and the result was not compared"
+    if "E" in out and out["tables"] != e["tables"]:
+        return False, f"query {q}: find_tables gave different tables"
+    if not e["E"] and not e["tables"] and "E" in out:
+        return False, f"query {q}: ran the executor on a query the test does not execute"
     for st, name in (("E", "result"), ("T", "transpile")):
         if st in out and out[st] not in e[st]:
             return False, f"query {q}: the {name} differs"

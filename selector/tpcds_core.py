@@ -184,16 +184,16 @@ STAGES = ("P", "O", "E", "T")  # parse + pickle, find_tables + optimize, plan + 
 
 def run_query(sql, meta, schema, tables, want=("O", "E", "T"), hook=None, expected=None):
     """One query through the pipeline. Stage P (parse, pickle round trip) always runs.
-    Without `expected` (the recorder), O, E and T run when named in `want`.
-    With `expected` (the replay, the pristine digests of this query): `want` names the stages that
-    execute a changed line. A stage that runs no changed line, fed an input identical to the
-    pristine one, gives the pristine output, so the run stops as soon as a stage with digests
-    equal to pristine is followed only by such stages:
-      O runs when O or E is wanted, or when P differs; it stops there when its digest is pristine
-        and E is not wanted; otherwise E runs;
-      T (transpile, which only reads the SQL string) runs when wanted.
-    Returns {stage: digest} for the stages that ran, "ok" (the shared tables and schema came out
-    as they went in), "tables". `hook(stage)` is called when a stage ends. Raises on any error."""
+    `want` names the stages that execute a changed line (the recorder asks for all of them).
+      O or E wanted, or (with `expected`) the P digest differs from the pristine one: the executor
+        runs to the end. Nothing stops at the optimizer: find_tables, ensure_tables and the schema
+        build feed the executor outside the optimized tree, so only the executor's result can show
+        what they changed;
+      T (transpile, which only reads the SQL string) runs when wanted;
+      otherwise only P ran, and its digest decides.
+    Returns {stage: digest} for the stages that ran, "ok" (the shared tables and schema came out as
+    they went in), "tables" (what find_tables gave). `hook(stage)` is called when a stage ends.
+    Raises on any error."""
     import sqlglot.executor as ex
     from sqlglot import find_tables, parse_one, transpile
 
@@ -218,38 +218,24 @@ def run_query(sql, meta, schema, tables, want=("O", "E", "T"), hook=None, expect
     if runs and (want & {"O", "E"} or p_diff):
         used = sorted({t.name for t in find_tables(expression)})
         before = {n: _rows_hash(tables[n]) for n in used}
-        state = {"stopped": False}
         orig = ex.optimize
 
         def optimize(*a, **k):
             res = orig(*a, **k)
             out["O"] = digest(res)
             end("O")
-            if expected is None:
-                stop = "E" not in want
-            else:
-                stop = "E" not in want and out["O"] in expected["O"]
-            if stop:
-                state["stopped"] = True
-                raise Stop()
             return res
 
         ex.optimize = optimize
-        result = None
         try:
             result = ex.execute(expression, schema=schema, tables={n: tables[n] for n in used})
-        except Stop:
-            pass
         finally:
             ex.optimize = orig
-        if state["stopped"]:
-            pass
-        elif "O" not in out:
+        if "O" not in out:
             raise RuntimeError("optimize was not called")
-        else:
-            result = pickle.loads(pickle.dumps(result))  # back to the parent
-            out["E"] = digest((list(result.columns), [tuple(r) for r in result.rows]))
-            end("E")
+        result = pickle.loads(pickle.dumps(result))  # back to the parent
+        out["E"] = digest((list(result.columns), [tuple(r) for r in result.rows]))
+        end("E")
     if runs and "T" in want:
         out["T"] = sha(transpile(sql, write="duckdb")[0])
         end("T")

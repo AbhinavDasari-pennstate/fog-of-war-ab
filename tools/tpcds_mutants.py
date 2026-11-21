@@ -36,6 +36,24 @@ MUTANTS = {
         "        unnest = expression.args.get(\"unnest\")\n        if not unnest:\n            return self.sql(\n                exp.replace_placeholders(",
         True, "duckdb transpile (stage T)",
     ),
+    "ensure_tables": (
+        "sqlglot/executor/table.py",
+        "            result[table_name] = table\n",
+        "            result[table_name] = Table(columns=table.columns, rows=table.rows[1:])\n",
+        True, "stage O feeding E: the tables the executor gets lose a row (the optimized tree is untouched)",
+    ),
+    "find_tables": (
+        "sqlglot/expressions/builders.py",
+        "if isinstance(table, Table) and table.name and table.name not in scope.cte_sources\n",
+        "if isinstance(table, Table) and table.name and table.name not in scope.cte_sources and table.name != \"item\"\n",
+        True, "stage O feeding E: find_tables skips a table",
+    ),
+    "unbound": (
+        "sqlglot/executor/table.py",
+        "            rows = [tuple(row[name] for name in column_names) for row in table]\n",
+        "            Table = [tuple(row[name] for name in column_names) for row in table]\n",
+        True, "a statement no query reaches that makes Table local to the whole function (UnboundLocalError)",
+    ),
     "state": (
         "sqlglot/executor/__init__.py",
         "    result = PythonExecutor(tables=tables_).execute(plan)\n",
