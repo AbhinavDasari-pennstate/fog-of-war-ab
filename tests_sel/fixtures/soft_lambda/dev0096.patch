@@ -1,0 +1,13 @@
+diff --git a/sqlglot/parsers/exasol.py b/sqlglot/parsers/exasol.py
+index 1231f72..254d9cc 100644
+--- a/sqlglot/parsers/exasol.py
++++ b/sqlglot/parsers/exasol.py
+@@ -72,7 +72,7 @@ class ExasolParser(parser.Parser):
+         "REGEXP_LIKE": lambda args: exp.RegexpLike(
+             this=seq_get(args, 0),
+             expression=seq_get(args, 1),
+-            flag=seq_get(args, 2),
++            flag=seq_get(args, 3),
+             full_match=True,
+         ),
+         "REGEXP_SUBSTR": exp.RegexpExtract.from_arg_list,

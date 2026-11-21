@@ -80,6 +80,21 @@ class Maps:
                         self.flaky.add(num[line])
 
     @property
+    def seqcredit(self):
+        """file -> lines that only the sequential and post-clear coverage passes credited to a test, every earlier run having them
+        import-only (tools/seqcredit.py): the credit is the first importer's, not a dependency."""
+        w = getattr(self, "_seqcredit", None)
+        if w is None:
+            w = {}
+            try:
+                if os.path.exists(os.path.join(self.dir, "seqcredit.bin")):
+                    w = {k: set(v) for k, v in _read(self.dir, "seqcredit.bin").items()}
+            except Exception:
+                w = {}
+            self._seqcredit = w
+        return w
+
+    @property
     def importtime(self):
         """file -> set of lines that ran at import or collection time (before any test). The test
         set of such a line is not the set of tests that depend on it: widen with the name/class/file maps."""

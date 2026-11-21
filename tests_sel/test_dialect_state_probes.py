@@ -35,3 +35,12 @@ def test_state_clearing_mutants_keep_every_failing_test(maps, tests, name):
     failing = set(json.loads((FIX / "failing.json").read_text())[name])
     got, why = rules.select(diffparse.parse((FIX / f"{name}.patch").read_text()), maps, tests, src_root=PIN)
     assert not failing - set(got), f"{name}: {len(failing - set(got))} of {len(failing)} failing tests dropped ({why[:200]})"
+
+
+def test_lambda_edit_keeps_the_tests_selected_before_the_sequential_pass(maps, tests):
+    """synth-dev-1-0096 edits a lambda body in a table that runs at import: the sequential coverage pass credits the
+    import-time lines to the first importer, so the soft lambda branch must ignore importtime and unstable lines."""
+    soft = Path(__file__).resolve().parent / "fixtures" / "soft_lambda"
+    before = set(json.loads((soft / "dev0096_ba1e74e.json").read_text()))
+    got, why = rules.select(diffparse.parse((soft / "dev0096.patch").read_text()), maps, tests, src_root=PIN)
+    assert not before - set(got), f"{len(before - set(got))} of {len(before)} tests lost ({why[:200]})"

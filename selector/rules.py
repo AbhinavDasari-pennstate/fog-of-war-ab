@@ -178,10 +178,12 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
         # the edit sits inside a lambda body: it runs only when the lambda is called, and the tests
         # that called it are the ones that ran a line of the lambda in a test context (unstable
         # lines are unions over fork and non-fork runs, so complete)
+        # A line that only the sequential coverage pass credited (maps/seqcredit.bin) gives the first importer, not a caller: skipped.
+        kx = m.seqcredit.get(path, ())
         u = 0
         for l2 in range(soft[0], soft[1] + 1):
             sid = lm.get(l2)
-            if sid:
+            if sid and l2 not in kx:
                 u |= sets[sid]
         if u:
             return u

@@ -55,3 +55,7 @@ in order, tools/wmseq.py), 2 seeds for D (fork from a parent that first ran test
 test_time_slice_origin_roundtrip) fail in harness D, so they are not recorded and never drop.
 Rule (selector/weakmut.py Profile.droppable_tests): a function that writes shared state (cls, class name, module level name, global, cached) keeps every test
 numbered after the first test that sees a changed value, because test numbers are the one-process execution order.
+
+--- seqcredit.bin (T24 hardening) ---
+tools/seqcredit.py: 1476 lines in 44 files that every earlier run had import-only (present with an empty test set) and the sequential or post-clear pass
+credited to the first importer. selector/rules.py ignores them when it takes the line-coverage union of an edited lambda body (synth-dev-1-0096 narrowed from 30 tests to 1).
