@@ -1,0 +1,13 @@
+diff --git a/sqlglot/executor/table.py b/sqlglot/executor/table.py
+index 68fbc3c..be20cfd 100644
+--- a/sqlglot/executor/table.py
++++ b/sqlglot/executor/table.py
+@@ -151,7 +151,7 @@ def _ensure_tables(d: dict | None, dialect: DialectType = None) -> dict:
+                 for row in table
+             ]
+             column_names = tuple(column_name for column_name in table[0]) if table else ()
+-            rows = [tuple(row[name] for name in column_names) for row in table]
++            Table = [tuple(row[name] for name in column_names) for row in table]
+             result[table_name] = Table(columns=column_names, rows=rows)
+ 
+     return result

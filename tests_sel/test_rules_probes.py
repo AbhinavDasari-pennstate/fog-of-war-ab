@@ -40,6 +40,26 @@ CASES = {
         [f"tests/test_optimizer.py::TestOptimizer::{n}" for n in (
             "test_pushdown_projection", "test_qualify_columns__invalid", "test_expand_alias_refs")],
     ),
+    # T18: real full-suite failures of stress-3-0011 and stress-3-0049. DataType.from_str and
+    # Expr.__init_subclass__ run while modules import, so a changed decorator breaks every importer.
+    "decorator_on_method_called_at_import": (
+        "sqlglot/expressions/datatypes.py", 386, "@classmethod", "@staticmethod",
+        ["tests/dialects/test_databricks.py::TestDatabricks::test_add_date",
+         "tests/dialects/test_dialect.py::TestDialect::test_regr_r2",
+         "tests/dialects/test_doris.py::TestDoris::test_analyze",
+         "tests/dialects/test_oracle.py::TestOracle::test_join_marker",
+         "tests/dialects/test_tsql.py::TestTSQL::test_types_date",
+         "tests/test_optimizer.py::TestOptimizer::test_nested_type_annotation"],
+    ),
+    "decorator_on_init_subclass": (
+        "sqlglot/expressions/core.py", 104, "@classmethod", "@staticmethod",
+        ["tests/dialects/test_databricks.py::TestDatabricks::test_add_date",
+         "tests/dialects/test_dialect.py::TestDialect::test_regr_r2",
+         "tests/dialects/test_doris.py::TestDoris::test_analyze",
+         "tests/dialects/test_oracle.py::TestOracle::test_join_marker",
+         "tests/test_expressions.py::TestExprs::test_literal_number",
+         "tests/test_transforms.py::TestTransforms::test_eliminate_join_marks"],
+    ),
     "executor_body_line": (
         "sqlglot/executor/python.py", 385, "source_group, join_group", "join_group, source_group",
         [f"tests/test_executor.py::TestExecutor::{n}" for n in (
@@ -105,3 +125,77 @@ def test_fixture_comment_with_unicode_line_separator_is_not_a_noop(env):
     patch = (Path(__file__).resolve().parent / "fixtures" / "identity_u2028.patch").read_text()
     got, _ = rules.select(diffparse.parse(patch), maps, tests, src_root=PIN)
     assert got
+
+
+def test_syntax_error_in_a_lazily_loaded_dialect_module_selects_every_test_that_loads_it(env):
+    """stress-3-0028: sqlglot/generators/exasol.py is imported only through the dialect registry
+    (Dialect.classes, a dialect name string, iterating Dialects). Static imports and the preimported
+    coverage runs do not see those tests; the cold import map (maps/lazyimp.bin) does."""
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/generators/exasol.py"
+    old = (PIN / rel).read_text("utf-8")
+    got, _ = rules.select(diffparse.parse(make_patch(rel, old, old + "def broken(:\n")), maps, tests, src_root=PIN)
+    ids = {t["id"]: t["number"] for t in tests}
+    for want in ("tests/dialects/test_dialect.py::TestDialect::test_enum",
+                 "tests/dialects/test_dialect.py::TestDialect::test_regr_count",
+                 "tests/dialects/test_druid.py::TestDruid::test_druid",
+                 "tests/test_generator.py::TestGenerator::test_generator_memory",
+                 "tests/test_time.py::TestTime::test_canonical_time_format_vocabulary"):
+        assert ids[want] in got, want
+
+
+def test_default_in_def_header_is_not_widened_when_the_body_never_ran_at_import(env):
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/optimizer/qualify.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace("isolate_tables: bool = False,", "isolate_tables: bool = True,", 1)
+    assert new != old
+    got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    assert 0 < len(got) < 1000  # the def header always runs at import; only a body line that does widens
+
+
+def test_decorator_on_init_subclass_selects_every_importer_of_expressions(env):
+    """Expr.__init_subclass__ runs for every Expr class at import: stress-3-0049 fails 1600 tests."""
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/expressions/core.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace("    @classmethod\n    def __init_subclass__", "    @staticmethod\n    def __init_subclass__", 1)
+    assert new != old
+    got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    assert len(got) >= 1600
+
+
+TPCDS = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+
+
+def test_m3_uncovered_statement_that_makes_a_global_name_local_selects_every_caller(env):
+    """Reviewer M3: `rows = [...]` became `Table = [...]` in a branch few tests run. Table becomes a local of
+    the whole function, so every call raises UnboundLocalError (test_execute_tpcds really fails)."""
+    maps, tests, diffparse, rules = env
+    patch = (Path(__file__).resolve().parent / "fixtures" / "unbound_local.patch").read_text()
+    got, why = rules.select(diffparse.parse(patch), maps, tests, src_root=PIN)
+    ids = {t["id"]: t["number"] for t in tests}
+    assert ids[TPCDS] in got, why
+
+
+def test_m3_variant_yield_in_a_rarely_run_statement_selects_every_caller(env):
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/executor/table.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace("            rows = [tuple(row[name] for name in column_names) for row in table]",
+                      "            yield [tuple(row[name] for name in column_names) for row in table]", 1)
+    assert new != old
+    got, why = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    ids = {t["id"]: t["number"] for t in tests}
+    assert ids[TPCDS] in got, why
+
+
+def test_scope_hazards_unit():
+    import pyscope
+
+    base = "G = 1\ndef f(x):\n    if x:\n        rows = 1\n    return rows if x else G\n"
+    assert pyscope.scope_hazards(base, base.replace("rows = 1", "rows = 2")) == []
+    assert pyscope.scope_hazards(base, base.replace("rows = 1", "G = 1")) != []  # G becomes local
+    assert pyscope.scope_hazards(base, base.replace("rows = 1", "yield 1")) != []  # generator
+    assert pyscope.scope_hazards(base, base.replace("rows = 1", "tmp = 1")) != []  # rows no longer bound: global lookup
+    assert pyscope.scope_hazards(base, base.replace("rows = 1", "rows = 1\n        extra = 2")) == []  # brand-new name
