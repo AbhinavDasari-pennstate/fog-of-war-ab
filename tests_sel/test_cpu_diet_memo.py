@@ -124,3 +124,25 @@ def test_rss_bytes_reads_this_process_on_linux():
     if not Path("/proc/self/statm").exists():
         pytest.skip("no /proc here")
     assert M._rss_bytes() > 1 << 20
+
+
+def test_before_replays_the_caches_are_dropped_and_the_collector_runs(monkeypatch):
+    import gc
+
+    import pyscope
+
+    order = []
+    monkeypatch.setattr(pyscope, "clear_caches", lambda: order.append("clear"))
+    monkeypatch.setattr(gc, "collect", lambda *a: order.append("collect") or 0)
+    M._free_before_replays()
+    assert order == ["clear", "collect"]
+
+
+def test_main_frees_memory_before_it_starts_any_replay():
+    import ast
+
+    tree = ast.parse((Path(M.__file__)).read_text())
+    main_fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    guard = next(n for n in ast.walk(main_fn) if isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == "pending")
+    first = guard.body[0]
+    assert isinstance(first, ast.Expr) and isinstance(first.value, ast.Call) and first.value.func.id == "_free_before_replays"

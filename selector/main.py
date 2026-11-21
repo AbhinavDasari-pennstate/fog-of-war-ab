@@ -109,6 +109,16 @@ def _collect_if_large() -> None:
         _RSS_LIMIT[0] = max(500 << 20, _rss_bytes() + (300 << 20))
 
 
+def _free_before_replays() -> None:
+    """The replay children need the memory: drop the parse caches, then collect what only a reference cycle still holds
+    (the collector is off for the static pass, see main)."""
+    import gc
+    import pyscope
+
+    pyscope.clear_caches()
+    gc.collect()
+
+
 def decide(patch_text: str, src_root: Path, tests: list[dict], maps=None) -> list[list[int]]:
     """Workers for one commit. With maps: rules R0 to R9; without: the v0 rule."""
     if maps is not None:
@@ -323,9 +333,7 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
     # replays, cheapest first, inside the budgets; two at a time (the container has 2 cores). Which
     # replays are submitted depends only on the estimates, so the same batch gets the same decisions.
     if pending:  # a batch with no replay never imports subprocess or concurrent.futures
-        import pyscope
-
-        pyscope.clear_caches()  # the replay children need the memory
+        _free_before_replays()
         wall0 = time.monotonic()
         spent = 0.0
         pending.sort(key=lambda x: (x[0], x[1]))  # cheapest first: the budget buys the most drops
