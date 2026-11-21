@@ -272,3 +272,41 @@ def test_sample_never_drops_a_test_that_really_fails(real):
 def test_a_mutation_a_giant_feels_keeps_the_giant(real):
     on, _ = sample_select(real, "3utz")  # `and` -> `or`, tpch and tpcds really fail
     assert {1106, 1107} <= on
+
+
+# ---- compact whole-suite profile (format 3) ---------------------------------------------------------
+
+def _profile_case():
+    old = "def f(x):\n    return x is None\n"
+    new = old.replace("is", "==")
+    node = [n for n in ast.walk(ast.parse(old)) if isinstance(n, ast.Compare)][0]
+    key = (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset, "C")
+    return old, new, key
+
+
+def test_profile_drops_match_the_dict_form_and_keep_unrecorded_tests():
+    old, new, key = _profile_case()
+    p = "sqlglot/x.py"
+    # tests 7: ran, == agrees; 8: ran, == differs; 9: recorded, never ran here; 10: not recorded at all; 11: unknown
+    prof = W.Profile(
+        (1 << 7) | (1 << 8) | (1 << 9) | (1 << 11),
+        {p: {key: [(W.EVAL_BIT, 1 << 7), (W.EVAL_BIT | 1 << 4, 1 << 8), (W.EVAL_BIT | W.UNKNOWN_BIT, 1 << 11)]}},
+    )
+    got, _ = W.drops(p, None, old, new, prof)
+    assert got == {7, 9}  # 10 was never recorded: never dropped; 8 differs; 11 unknown
+    got, _ = W.drops(p, None, old, new, prof, srcreaders=1 << 7)
+    assert got == {9}
+
+
+def test_profile_never_drops_and_or_not_sites_that_ran():
+    p = "sqlglot/x.py"
+    old, new = "def f(a, b):\n    return a and b\n", "def f(a, b):\n    return a or b\n"
+    node = [n for n in ast.walk(ast.parse(old)) if isinstance(n, ast.BoolOp)][0]
+    key = (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset, "B")
+    prof = W.Profile((1 << 3) | (1 << 4), {p: {key: [(W.EVAL_BIT, 1 << 3)]}})
+    got, _ = W.drops(p, None, old, new, prof)
+    assert got == {4}  # 3 ran the site; 4 never did
+
+
+def test_empty_profile_is_false():
+    assert not W.Profile(0, {})

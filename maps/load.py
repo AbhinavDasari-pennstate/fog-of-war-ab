@@ -112,9 +112,21 @@ class Maps:
                 if os.path.exists(os.path.join(self.dir, "weakmut.bin")):
                     d = _read(self.dir, "weakmut.bin")
                     self.weakmut_rec = d.get("rec")
-                    for n, rec in d.get("tests", {}).items():
-                        if n < len(self.ids) and self.ids[n] == rec["id"]:
-                            w[n] = rec["sites"]
+                    if d.get("fmt") == "sites":  # compact profile of many tests (selector/weakmut.py Profile)
+                        import sys
+
+                        sys.path.insert(0, os.path.join(os.path.dirname(self.dir), "selector"))
+                        import weakmut as _W
+
+                        ok = 0
+                        for n, tid in d["ids"].items():
+                            if n < len(self.ids) and self.ids[n] == tid:
+                                ok |= 1 << n
+                        w = _W.Profile(d["recorded"] & ok, d["sites"])
+                    else:
+                        for n, rec in d.get("tests", {}).items():
+                            if n < len(self.ids) and self.ids[n] == rec["id"]:
+                                w[n] = rec["sites"]
             except Exception:
                 w = {}  # a damaged file only disables the rule
             self._weakmut = w

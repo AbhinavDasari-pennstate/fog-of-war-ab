@@ -29,7 +29,7 @@ def main():
 
     tests = json.loads((Path(a.data) / "tests.json").read_text())["tests"]
     maps = load(a.maps)
-    full = dict(maps.weakmut)
+    full = maps.weakmut  # a dict (per-test format) or a weakmut.Profile
     out = []
     for p in sorted((Path(a.data) / "commits").glob("*.patch")):
         changes = diffparse.parse(p.read_text(encoding="utf-8"))

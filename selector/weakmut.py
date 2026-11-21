@@ -183,6 +183,41 @@ def droppable(kind, j, mask: int) -> bool:
     return False  # B and N: a swap or a removed `not` can differ on any evaluation
 
 
+class Profile:
+    """Compact weak-mutation profile of many tests (maps/weakmut.bin, format 3).
+
+    recorded: bitmask of the tests with a complete recording (a test that failed, was skipped or timed out
+    while recording is not in it, so it is never dropped). sites: path -> {(line, col, end_line, end_col, kind):
+    [(mask, tests bitmask), ...]}, one group per distinct merged summary mask; a recorded test that appears in
+    no group of a site never ran there."""
+
+    def __init__(self, recorded: int, sites: dict):
+        self.recorded = recorded
+        self.sites = sites
+
+    def __bool__(self):
+        return bool(self.recorded)
+
+    def groups(self, path, key):
+        return self.sites.get(path, {}).get(key, ())
+
+    def droppable_tests(self, path, key, kind, j) -> int:
+        keep = 0
+        for mask, bits in self.groups(path, key):
+            if not droppable(kind, j, mask):
+                keep |= bits
+        return self.recorded & ~keep
+
+
+def _bits_of(mask: int):
+    n = 0
+    while mask:
+        low = mask & -mask
+        n = low.bit_length() - 1
+        yield n
+        mask ^= low
+
+
 def drops(path, patch_changes, old_text, new_text, summaries, srcreaders=0):
     """Giant test numbers (keys of summaries) the single mutation provably cannot affect.
 
@@ -202,6 +237,9 @@ def drops(path, patch_changes, old_text, new_text, summaries, srcreaders=0):
     kind, j = cl
     key = key_tuple(a, kind)
     out = set()
+    if isinstance(summaries, Profile):
+        out = set(_bits_of(summaries.droppable_tests(path, key, kind, j) & ~srcreaders))
+        return out, f"weakmut {path}:{a.lineno} {kind}{'' if j is None else ' -> ' + OPS[j].__name__}: dropped {len(out)} tests"
     for t, per in summaries.items():
         if (srcreaders >> t) & 1:
             continue
