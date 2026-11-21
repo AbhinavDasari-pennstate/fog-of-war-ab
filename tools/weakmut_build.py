@@ -29,8 +29,11 @@ def run_one(py, src, work, tid, timeout, seed):
                PYTHONPATH=os.pathsep.join([os.path.join(ROOT, "tools", "weakmut_site"), src]),
                PYTHONDONTWRITEBYTECODE="1", PYTHONHASHSEED=str(seed))
     t0 = time.time()
-    r = subprocess.run([py, "-m", "pytest", tid, "-p", "no:cacheprovider", "-o", "addopts=", "-q", "-x"],
-                       cwd=src, env=env, capture_output=True, text=True, timeout=timeout)
+    try:
+        r = subprocess.run([py, "-m", "pytest", tid, "-p", "no:cacheprovider", "-o", "addopts=", "-q", "-x"],
+                           cwd=src, env=env, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, time.time() - t0, {}, "timeout"  # no entry is written, so the test is never dropped
     secs = time.time() - t0
     summ = {}
     for f in os.listdir(out):

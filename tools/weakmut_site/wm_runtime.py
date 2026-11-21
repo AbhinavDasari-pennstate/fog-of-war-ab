@@ -45,7 +45,7 @@ def _builtin_cmp(t):
     ok = _TYPE_SAFE.get(t)
     if ok is None:
         ok = True
-        for name in _CMP + ("__hash__", "__contains__", "__bool__", "__len__", "__iter__"):
+        for name in _CMP + ("__hash__",):
             for k in t.__mro__:
                 if name in k.__dict__:
                     # static (non heap) builtin types, or the enum module's own pure methods
@@ -68,9 +68,15 @@ def _sf(x):
     return _builtin_cmp(t)
 
 
+def _pair_safe(a, b):
+    """A scalar against any static builtin type never reaches user code (`[x] == None`, `{} < 3`)."""
+    ta, tb = type(a), type(b)
+    return (ta in _SCALARS and not tb.__flags__ & HEAP) or (tb in _SCALARS and not ta.__flags__ & HEAP)
+
+
 def _alt(opi, a, b, r):
     m = 0
-    safe = _sf(a) and _sf(b)
+    safe = _pair_safe(a, b) or (_sf(a) and _sf(b))
     for j in range(10):
         if j == opi:
             continue

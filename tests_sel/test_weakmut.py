@@ -193,3 +193,75 @@ def test_enum_and_default_objects_are_safe_to_compare(rt):
     ns["f"](object(), None)
     (mask,) = bits(rt, "C").values()
     assert not mask & (1 << 4)
+
+
+def test_container_against_none_is_safe_even_with_user_elements(rt):
+    ns = run_instrumented(
+        "class E:\n    calls = 0\n    def __eq__(self, o):\n        E.calls += 1\n        return True\n"
+        "    __hash__ = None\n"
+        "def f(a, b):\n    return a is b\n", rt)
+    ns["f"]([ns["E"]()], None)
+    ns["f"]({1: ns["E"]()}, None)
+    assert ns["E"].calls == 0
+    (mask,) = bits(rt, "C").values()
+    assert not mask & (1 << 4)  # list == None agrees with `is`, without calling any element
+
+
+# ---- the rule on the committed maps and the organiser sample -------------------------------------
+from conftest import KIT, PIN, ROOT, needs_kit, needs_pin  # noqa: E402
+
+GIANTS = {1490, 1106, 1224, 1107, 1123}
+
+
+@pytest.fixture(scope="module")
+def real():
+    import json
+
+    sys.path.insert(0, str(ROOT))
+    from maps.load import load
+
+    maps = load(str(ROOT / "maps"))
+    if not maps.weakmut:
+        pytest.skip("maps/weakmut.bin not built")
+    tests = json.loads((KIT / "sample" / "tests.json").read_text("utf-8"))["tests"]
+    answers = json.loads((KIT / "sample" / "answers.json").read_text("utf-8"))["commits"]
+    return maps, tests, answers
+
+
+def sample_select(real, cid, weak=True):
+    import diffparse
+    import rules
+
+    maps, tests, _ = real
+    full = maps.weakmut
+    maps._weakmut = full if weak else {}
+    try:
+        text = (KIT / "sample" / "commits" / f"{cid}.patch").read_bytes().decode("utf-8")
+        return rules.select(diffparse.parse(text), maps, tests, src_root=PIN)
+    finally:
+        maps._weakmut = full
+
+
+@needs_pin
+@needs_kit
+def test_sample_is_to_eq_commits_drop_the_tpcds_giant(real):
+    for cid in ("2haz", "66ks"):  # `is` -> `==` on an enum member / on None
+        on, why = sample_select(real, cid)
+        off, _ = sample_select(real, cid, weak=False)
+        assert 1106 in off and 1106 not in on, why
+
+
+@needs_pin
+@needs_kit
+def test_sample_never_drops_a_test_that_really_fails(real):
+    _, _, answers = real
+    for cid, a in answers.items():
+        on, _ = sample_select(real, cid)
+        assert set(a["failing"]) <= on, cid
+
+
+@needs_pin
+@needs_kit
+def test_a_mutation_a_giant_feels_keeps_the_giant(real):
+    on, _ = sample_select(real, "3utz")  # `and` -> `or`, tpch and tpcds really fail
+    assert {1106, 1107} <= on
