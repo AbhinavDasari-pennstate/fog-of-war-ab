@@ -95,6 +95,24 @@ class Maps:
         return w
 
     @property
+    def impexec(self):
+        """(file -> modules, class qualname -> modules, file -> [(first line, last line, modules)], state) from impexec.bin (tools/impexec.py): the modules whose body, while it
+        imports, ran a function of that file / a method of that class. state is "absent" (no file: nothing to add) or "bad" (damaged:
+        the selector widens). A one-line edit of a table or function such a call reads changes what the importer does, or whether it
+        imports at all; the tests that import the module (self.imports, lazy imports included) are the ones it can fail."""
+        w = getattr(self, "_impexec", None)
+        if w is None:
+            w = ({}, {}, {}, "absent")
+            try:
+                if os.path.exists(os.path.join(self.dir, "impexec.bin")):
+                    d = _read(self.dir, "impexec.bin")
+                    w = (d["file"], d["class"], d["range"], "ok")
+            except Exception:
+                w = ({}, {}, {}, "bad")
+            self._impexec = w
+        return w
+
+    @property
     def importtime(self):
         """file -> set of lines that ran at import or collection time (before any test). The test
         set of such a line is not the set of tests that depend on it: widen with the name/class/file maps."""

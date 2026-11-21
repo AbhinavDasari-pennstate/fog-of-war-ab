@@ -54,6 +54,7 @@ class Ctx:
         self.narrow = None  # (start line, mask) of a class-level assignment narrowed by maps/attrreads.bin
         self._attr = None
         self._val = None
+        self.doc_only = False  # every difference of the current file is the text of a string statement (a docstring)
 
     def attr(self):
         if self._attr is None:
@@ -78,6 +79,36 @@ class Ctx:
                 return self.by_file[path] | sr
             return self.all
         return m | sr | self.m.files.get(path, 0)
+
+    def imptime(self, path: str, cls: str, soft=None) -> int:
+        """Tests that import a module whose body, while it imports, ran code the edit can reach (maps/impexec.bin).
+
+        The coverage maps cannot see these runs: the map build preimports every module in the parent process, and a test
+        that imports a module lazily (Dialect.get_or_raise) is not credited with the classes and names the import used. An edit
+        of class- or module-level data (a keyword table, a parser or generator table) can change what such an import does, or make it
+        raise, and then every test that imports that module fails. cls: the class holding the edited statement ("" at module level).
+        soft: (first, last) line of the lambda the edit sits in: only that lambda's code can run. Otherwise a class-level edit is
+        reached by the methods of the class (or of a subclass) that ran, a module-level one by the functions of the file that ran.
+        The module being edited is left out: a change of what its own body does is the business of the class and name maps."""
+        files, classes, ranges, state = self.m.impexec
+        if state == "absent" or self.doc_only:
+            return 0
+        if state == "bad":
+            return self.all
+        mods = set()
+        if soft:
+            for lo, hi, ms in ranges.get(path, ()):
+                if lo <= soft[1] and soft[0] <= hi:
+                    mods.update(ms)
+        elif cls:
+            mods.update(classes.get(cls, ()))
+        else:
+            mods.update(files.get(path, ()))
+        mods.discard(path)
+        out = 0
+        for f in mods:
+            out |= self.m.imports.get(f, self.all) | self.m.srcreaders.get(f, 0)
+        return out
 
     def udef(self, path: str, d0: int, d1: int) -> int:
         lm = self.m.lines.get(path)
@@ -163,6 +194,13 @@ def _mentions(ctx: Ctx, names, cls: str) -> int:
 _ENUM = re.compile(r"\b(Enum|AutoName|IntEnum|StrEnum|Flag|IntFlag)\b")
 
 
+def _doc_only(old_tree, diffs) -> bool:
+    """True when every difference is the text of a string constant that is a whole statement (a docstring, or an attribute
+    docstring that is evaluated and thrown away). The only reader of a first-statement docstring is `__doc__`."""
+    strs = {id(n.value) for n in ast.walk(old_tree) if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)}
+    return bool(diffs) and all(id(n) in strs for n, _ in diffs)
+
+
 def _is_enum(old_lines, start: int, cls: str) -> bool:
     """True when the class holding the statement at `start` has an enum base."""
     simple = cls.rsplit(".", 1)[-1]
@@ -177,6 +215,10 @@ def _is_enum(old_lines, start: int, cls: str) -> bool:
 
 
 def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_texts=(), added_texts=(), soft=False) -> int:
+    return _class_level_core(ctx, path, s, ln, texts, old_lines, removed_texts, added_texts, soft) | ctx.imptime(path, s[5], soft)
+
+
+def _class_level_core(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_texts=(), added_texts=(), soft=False) -> int:
     m = ctx.m
     start, end, kind, d0, d1, cls = s
     il = m.importtime.get(path, ())
@@ -441,6 +483,7 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
         except Exception:
             pass
     ctx.narrow = None
+    ctx.doc_only = _doc_only(old_tree, diffs)
     if ctx.single and path.startswith("sqlglot/"):
         try:
             f = attrrule.find(old_tree, new_tree, old_text)

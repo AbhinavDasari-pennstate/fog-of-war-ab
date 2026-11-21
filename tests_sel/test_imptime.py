@@ -1,0 +1,84 @@
+"""T28: a class- or module-level data edit that changes what a module does while it imports (a parse at import, a metaclass hook) fails every
+test that imports that module, lazily or not. Real full-suite runs (reviewer f09 and four crafted edits of the same kind) failed tests the
+coverage maps had no context for: test_time.py::test_canonical_time_format_vocabulary imports the duckdb generator only through the dialect
+registry, and importing it raises when the tokenizer maps SELECT to another token."""
+
+import json
+import sys
+
+import pytest
+
+from conftest import KIT, PIN, ROOT, make_patch, needs_kit, needs_pin
+
+sys.path.insert(0, str(ROOT))
+pytestmark = [needs_pin, needs_kit]
+
+LAZY = "tests/test_time.py::TestTime::test_canonical_time_format_vocabulary"
+
+# (file, line, old text, new text): each one makes `import sqlglot.generators.duckdb` raise while `import sqlglot` still works
+CASES = {
+    "tokenizer_keywords_select": ("sqlglot/tokens.py", 392, "TokenType.SELECT", "TokenType.SET"),
+    "tokenizer_keywords_with": ("sqlglot/tokens.py", 426, "TokenType.WITH", "TokenType.SET"),
+    "parser_window_tokens": ("sqlglot/parser.py", 1806, "{TokenType.OVER}", "{TokenType.SET}"),
+    "dialect_flag": ("sqlglot/dialects/dialect.py", 467, "SUPPORTS_USER_DEFINED_TYPES = True", "SUPPORTS_USER_DEFINED_TYPES = False"),
+}
+
+
+@pytest.fixture(scope="module")
+def env():
+    from maps.load import load
+    import diffparse
+    import rules
+
+    tests = json.loads((KIT / "sample" / "tests.json").read_text("utf-8"))["tests"]
+    return load(str(ROOT / "maps")), tests, diffparse, rules
+
+
+def _select(env, rel, ln, old_s, new_s):
+    maps, tests, diffparse, rules = env
+    old = (PIN / rel).read_text("utf-8")
+    lines = old.split("\n")
+    assert old_s in lines[ln - 1], (rel, ln, lines[ln - 1])
+    lines[ln - 1] = lines[ln - 1].replace(old_s, new_s)
+    got, why = rules.select(diffparse.parse(make_patch(rel, old, "\n".join(lines))), maps, tests, src_root=PIN)
+    return got, why, {t["id"]: t["number"] for t in tests}
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_edit_that_breaks_a_lazily_imported_module_selects_its_lazy_importers(env, name):
+    got, _, ids = _select(env, *CASES[name])
+    assert ids[LAZY] in got
+
+
+def test_docstring_only_edit_adds_no_import_time_tests(env):
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/dialects/dialect.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace('"""Whether `CONCAT`\'s arguments must be strings."""', '"""Whether `CONCAT`\'s arguments must be strings (edited)."""', 1)
+    assert new != old
+    got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    ctx = rules.Ctx(maps, tests, PIN)
+    ctx.doc_only = True
+    assert ctx.imptime(rel, "Dialect") == 0
+    assert len(got) < 1600
+
+
+def test_imptime_skips_the_edited_module_and_reads_the_class_map(env):
+    maps, tests, diffparse, rules = env
+    ctx = rules.Ctx(maps, tests, PIN)
+    files, classes, ranges, state = maps.impexec
+    assert state == "ok"
+    assert "sqlglot/generators/duckdb.py" in classes["Tokenizer"] or "sqlglot/generators/duckdb.py" in files["sqlglot/tokens.py"]
+    with_self = ctx.imptime("sqlglot/dialects/bigquery.py", "")
+    assert isinstance(with_self, int)
+
+
+def test_damaged_map_widens_to_every_test(env):
+    maps, tests, diffparse, rules = env
+
+    class Damaged:
+        impexec = ({}, {}, {}, "bad")
+
+    ctx = rules.Ctx(maps, tests, PIN)
+    ctx.m = Damaged()
+    assert ctx.imptime("sqlglot/tokens.py", "Tokenizer") == ctx.all

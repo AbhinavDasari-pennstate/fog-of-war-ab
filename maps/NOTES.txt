@@ -72,3 +72,15 @@ arg_types sites ("req"): the values are read in bulk only by Expr.__init_subclas
 only by Expression.error_messages (core.py:1322). Expression.error_messages is wrapped during recording to log "M:<key>" for every validated instance with no value
 for a key of its class's arg_types; a bool flip of an entry adds the tests that logged that key, a change that keeps bool(value) adds nothing.
 Selector side: selector/valrule.py, rule "V" in rules.py (_one, before L2).
+
+--- impexec.bin (T28) ---
+Import-time execution map: tools/impexec.py imports every sqlglot module (and every dialect class) in one process under sys.setprofile and, for every Python
+function call whose caller chain has a module body (code name <module>) on the stack, credits the innermost such module M:
+  file[F]   -> {M}   functions of F ran under M's body;   class[Q] -> {M}   methods of Q (or of a subclass, through the first argument's MRO) ran under M's body;
+  range[F]  -> [(first line, last line, {M})]   the function or lambda at those lines of F ran under M's body.
+Why: a one-line edit of a class- or module-level table (Tokenizer.KEYWORDS) changes what module bodies that parse or tokenize while they import do, or makes
+the import raise (generators/duckdb.py parses at import; reviewer f09: KEYWORDS "SELECT": TokenType.SET). Tests that import such a module lazily
+(Dialect.get_or_raise: test_time.py::test_canonical_time_format_vocabulary) fail, yet no coverage context ran the readers: the map build preimports.
+Selector side: Ctx.imptime in selector/rules.py, added to every class- or module-level statement edit (_class_level): the tests that import (imports.bin plus
+lazyimp.bin, cold) every such M other than the edited file itself; a lambda-body edit uses only the ranges that overlap its lambda; a docstring-only edit adds nothing.
+Rebuild: PYTHONHASHSEED=0 python -I tools/impexec.py --src <pinned sqlglot checkout> --out maps/impexec.bin
