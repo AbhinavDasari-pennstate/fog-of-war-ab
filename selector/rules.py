@@ -135,13 +135,19 @@ def _mentions(ctx: Ctx, names, in_class: bool) -> int:
     return out
 
 
-def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_texts=(), added_texts=()) -> int:
+def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_texts=(), added_texts=(), soft=False) -> int:
     m = ctx.m
     start, end, kind, d0, d1, cls = s
     il = m.importtime.get(path, ())
     un = m.unstable.get(path, ())
     sets = m.sets
     lm = m.lines.get(path, {})
+    if soft:
+        # the edit sits inside a lambda body: it runs only when the lambda is called, and the tests
+        # that called it are the ones that ran this line in a test context
+        sid = lm.get(ln)
+        if sid:  # unstable lines are unions over fork and non-fork runs, so complete
+            return sets[sid]
     # A continuation line of a multi-line class/module statement that never ran at import
     # (a lambda body inside a table) is credited exactly by coverage.
     sid = lm.get(ln)
@@ -195,7 +201,7 @@ def _func_level(ctx: Ctx, path: str, s) -> int:
     return out
 
 
-def _py_lines(ctx: Ctx, path: str, change, old_lines, is_test_file: bool) -> int:
+def _py_lines(ctx: Ctx, path: str, change, old_lines, is_test_file: bool, soft=lambda ln: False) -> int:
     m = ctx.m
     out = 0
     if m.stmts.get(path) is None:
@@ -214,7 +220,7 @@ def _py_lines(ctx: Ctx, path: str, change, old_lines, is_test_file: bool) -> int
                 elif is_test_file:
                     out |= ctx.by_file.get(path, 0)
                 else:
-                    out |= _class_level(ctx, path, s, ln, texts, old_lines, [t for _, t in removed], added)
+                    out |= _class_level(ctx, path, s, ln, texts, old_lines, [t for _, t in removed], added, soft(ln))
         if not _stmts_near_any(ctx, path, touched):
             out |= ctx.wide(path)
     return out
@@ -283,14 +289,29 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return ctx.wide(path) | sr, f"R3 {path}: does not parse"
     old_tree = pyscope.parse(old_text, path)
-    if pyscope.dump(old_tree) == pyscope.dump(new_tree):
+    ranges = []
+    for removed, added, p in _blocks(change):
+        ranges += [(ln, ln) for ln, _ in removed]
+        if not removed or len(added) > len(removed):
+            ranges.append((p, p + 1))
+    diffs = pyscope.ast_diff(old_tree, new_tree, ranges)
+    if not diffs:
         if any("\r" in t for h in change.hunks for _, t in h.lines):
             return ctx.wide(path) | sr, f"R9 {path}: carriage return in a changed hunk"
         return sr, f"R4 {path}: ast unchanged" + (" (source readers)" if sr else "")
     if not pyscope.compiles(new_tree, path):
         return ctx.wide(path) | sr, f"R3 {path}: does not compile"
+    hard, soft_r = [], []
+    for node, deferred in diffs:
+        lo = getattr(node, "lineno", None)
+        rng = (lo, getattr(node, "end_lineno", lo) or lo) if lo is not None else (0, 1 << 30)
+        (soft_r if deferred else hard).append(rng)
+
+    def soft(ln):
+        return (any(a <= ln <= b for a, b in soft_r) and not any(a <= ln <= b for a, b in hard))
+
     is_test = path.startswith("tests/") and os.path.basename(path).startswith("test_")
-    out = _py_lines(ctx, path, change, old_text.split("\n"), is_test) | sr
+    out = _py_lines(ctx, path, change, old_text.split("\n"), is_test, soft) | sr
     return out, f"R6/R7 {path}"
 
 

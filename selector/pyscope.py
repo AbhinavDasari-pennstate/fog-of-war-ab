@@ -65,3 +65,62 @@ def class_name(line: str) -> str:
 def is_code_line(text: str) -> bool:
     s = text.strip()
     return bool(s) and not s.startswith("#")
+
+
+_LINENO = ("lineno", "end_lineno")
+
+
+def ast_diff(old, new, ranges):
+    """Differences between two parsed files, looking only where the edit touched.
+
+    ranges: (lo, hi) old line ranges the patch changed. A subtree of the old tree that does not
+    overlap any range has identical text in both files, so it is skipped. Returns a list of
+    (old_node, deferred, hard) where old_node is the old node at which the trees stop agreeing
+    and deferred is True when the difference lies inside a lambda body (runs only when the lambda
+    is called). An empty list means the ASTs agree (comment, blank-line and layout edits).
+    """
+    out = []
+
+    def touched(node):
+        lo = getattr(node, "lineno", None)
+        if lo is None:
+            return True
+        hi = getattr(node, "end_lineno", lo) or lo
+        for d in getattr(node, "decorator_list", ()):  # decorators sit above the def line
+            lo = min(lo, d.lineno)
+        for a, b in ranges:
+            if a <= hi and lo <= b:
+                return True
+        return False
+
+    def walk(a, b, deferred, parent):
+        if isinstance(a, ast.AST):
+            if type(a) is not type(b):
+                out.append((parent, deferred))
+                return
+            if not touched(a):
+                return
+            for field in a._fields:
+                va = getattr(a, field, None)
+                vb = getattr(b, field, None)
+                inner = deferred or (isinstance(a, ast.Lambda) and field == "body")
+                if isinstance(va, list):
+                    if not isinstance(vb, list) or len(va) != len(vb):
+                        out.append((a, deferred))
+                        continue
+                    for x, y in zip(va, vb):
+                        walk(x, y, inner, a)
+                else:
+                    walk(va, vb, inner, a)
+        elif isinstance(a, list):
+            if not isinstance(b, list) or len(a) != len(b):
+                out.append((parent, deferred))
+                return
+            for x, y in zip(a, b):
+                walk(x, y, deferred, parent)
+        else:
+            if type(a) is not type(b) or a != b:
+                out.append((parent, deferred))
+
+    walk(old, new, False, old)
+    return out
