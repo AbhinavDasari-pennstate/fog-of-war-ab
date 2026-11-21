@@ -1,0 +1,12 @@
+diff --git a/sqlglot/trie.py b/sqlglot/trie.py
+--- a/sqlglot/trie.py
++++ b/sqlglot/trie.py
+@@ -8,7 +8,7 @@
+ class TrieResult(Enum):
+     FAILED = auto()
+     PREFIX = auto()
+-    EXISTS = auto()
++    EXISTS = 2
+ 
+ 
+ def new_trie(keywords: Iterable[key], trie: t.Optional[dict] = None) -> dict:

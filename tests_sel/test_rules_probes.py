@@ -86,3 +86,22 @@ def test_enum_member_value_flows_to_every_dialect_that_names_it(env):
     got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
     snow = [t["number"] for t in tests if "test_snowflake" in t["id"]]
     assert snow and set(snow) <= got
+
+
+def test_enum_member_value_edit_selects_readers_of_the_member(env):
+    maps, tests, diffparse, rules = env
+    patch = (Path(__file__).resolve().parent / "fixtures" / "enum_member.patch").read_text()
+    got, _ = rules.select(diffparse.parse(patch), maps, tests, src_root=PIN)
+    ids = {t["number"]: t["id"] for t in tests}
+    for want in ("test_postgres.py::TestPostgres::test_date_interval_timestamp",
+                 "test_postgres.py::TestPostgres::test_extract_date_parts",
+                 "test_parser.py::TestParser::test_text_match_excludes_delimited_tokens"):
+        n = [k for k, v in ids.items() if v.endswith(want)]
+        assert n and n[0] in got, want
+
+
+def test_fixture_comment_with_unicode_line_separator_is_not_a_noop(env):
+    maps, tests, diffparse, rules = env
+    patch = (Path(__file__).resolve().parent / "fixtures" / "identity_u2028.patch").read_text()
+    got, _ = rules.select(diffparse.parse(patch), maps, tests, src_root=PIN)
+    assert got

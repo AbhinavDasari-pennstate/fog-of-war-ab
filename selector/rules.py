@@ -141,6 +141,22 @@ def _mentions(ctx: Ctx, names, cls: str) -> int:
     return out
 
 
+_ENUM = re.compile(r"\b(Enum|AutoName|IntEnum|StrEnum|Flag|IntFlag)\b")
+
+
+def _is_enum(old_lines, start: int, cls: str) -> bool:
+    """True when the class holding the statement at `start` has an enum base."""
+    simple = cls.rsplit(".", 1)[-1]
+    head = re.compile(r"^(\s*)class\s+" + re.escape(simple) + r"\b(.*)")
+    i = start - 2
+    while i >= 0:
+        m = head.match(old_lines[i])
+        if m:
+            return bool(_ENUM.search(m.group(2)))
+        i -= 1
+    return False
+
+
 def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_texts=(), added_texts=(), soft=False) -> int:
     m = ctx.m
     start, end, kind, d0, d1, cls = s
@@ -189,6 +205,10 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
     for n in names:
         b |= m.names_attr.get(n, 0)
     a = m.names_class.get(cls, 0) if cls else 0
+    if cls and _is_enum(old_lines, start, cls):
+        # members are read as Class.NAME or by value from lines tests run; the class is never instantiated
+        for n in (t.group(1) if t else "", cls.rsplit(".", 1)[-1]):
+            out |= m.names_attr.get(n, 0)
     if a:
         out |= a
     else:
@@ -251,6 +271,9 @@ def _reads(ctx: Ctx, path: str) -> int:
 
 
 def _comment_or_blank(text: str) -> bool:
+    # the loader splits on more than \n (\r, \x0b, \x0c, \x1c-\x1e, \x85, U+2028, U+2029)
+    if len(text.splitlines()) > 1 or (text and text.splitlines() == []):
+        return False
     return text == "" or text.startswith("--")
 
 
