@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 import diffparse
+import attrrule
 import pyscope
 import weakmut
 
@@ -46,6 +47,14 @@ class Ctx:
             self.all |= 1 << t["number"]
             self.by_file[t["file"]] = self.by_file.get(t["file"], 0) | (1 << t["number"])
         self.notes: list[str] = []
+        self.single = False  # the patch changes one file
+        self.narrow = None  # (start line, mask) of a class-level assignment narrowed by maps/attrreads.bin
+        self._attr = None
+
+    def attr(self):
+        if self._attr is None:
+            self._attr = attrrule.Attr(self.m.dir)
+        return self._attr
 
     def note(self, s: str):
         self.notes.append(s)
@@ -181,7 +190,11 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
     sid = lm.get(ln)
     if start < end and sid and ln not in il and ln not in un:
         return sets[sid]
-    out = m.stmt_mask(path, ln)
+    nr = ctx.narrow
+    if nr is not None and nr[0] == start and all(l in il for l in range(start, end + 1)):
+        out = 0  # L2: a statement that only runs at import: who ran it lazily is not who depends on it
+    else:
+        out = m.stmt_mask(path, ln)
     if d0:  # def header or decorator: callers run the body, so the def's coverage decides
         out |= ctx.udef(path, d0, d1)
         if any(l in il for l in range(end + 1, d1 + 1)):  # body lines only: the header always runs at import
@@ -216,7 +229,11 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
         # members are read as Class.NAME or by value from lines tests run; the class is never instantiated
         for n in (t.group(1) if t else "", cls.rsplit(".", 1)[-1]):
             out |= m.names_attr.get(n, 0)
-    if a:
+    nr = ctx.narrow
+    if nr is not None and nr[0] == start:
+        out |= nr[1]  # L2: only the tests that read this attribute (recorded), never the whole class
+        ctx.note(f"L2 {path}:{start} attribute read map")
+    elif a:
         out |= a
     else:
         out |= b | m.files.get(path, 0)
@@ -342,6 +359,16 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
         return sr, f"R4 {path}: ast unchanged" + (" (source readers)" if sr else "")
     if not pyscope.compiles(new_tree, path):
         return ctx.wide(path) | sr, f"R3 {path}: does not compile"
+    ctx.narrow = None
+    if ctx.single and path.startswith("sqlglot/"):
+        try:
+            f = attrrule.find(old_tree, new_tree, old_text)
+            if f:
+                got = ctx.attr().readers(path, f[1], f[2])
+                if got is not None:
+                    ctx.narrow = (f[0], got)
+        except Exception:
+            ctx.narrow = None
     hard, soft_r = [], []
     for node, deferred in diffs:
         lo = getattr(node, "lineno", None)
@@ -400,6 +427,7 @@ def _weak(ctx: Ctx, changes) -> int:
 
 def select(changes, maps, tests, src_root=None):
     ctx = Ctx(maps, tests, src_root or DEFAULT_SRC)
+    ctx.single = len(changes) == 1
     mask = 0
     for ch in changes:
         try:
