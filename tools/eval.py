@@ -72,13 +72,21 @@ def run_native(ds: Dataset, selector: Path, src: Path | None = None):
 
 
 def run_docker(ds: Dataset, image: str):
-    """Run the image with the scorer's flags. Returns (stdout, stderr, wall seconds)."""
+    """Run the image with the scorer's flags, through the local CPU wrapper (same command as
+    the image's CMD). Returns (stdout, stderr, cpu seconds in the container, wall seconds)."""
     cmd = ["docker", "run", *DOCKER_FLAGS,
            "--volume", f"{ds.data_dir / 'commits'}:/data/commits:ro",
-           "--volume", f"{ds.data_dir / 'tests.json'}:/data/tests.json:ro", image]
+           "--volume", f"{ds.data_dir / 'tests.json'}:/data/tests.json:ro",
+           "--volume", f"{ROOT / 'tools' / 'cpu_wrap.py'}:/cpu_wrap.py:ro",
+           image, "python", "/cpu_wrap.py", "python", "-S", "-E", "/app/selector/main.py"]
     t0 = time.monotonic()
     r = subprocess.run(cmd, capture_output=True)
-    return r.stdout, r.stderr.decode("utf-8", "replace"), time.monotonic() - t0
+    stderr = r.stderr.decode("utf-8", "replace")
+    cpu = None
+    for line in stderr.splitlines():
+        if line.startswith("CPU_SECONDS "):
+            cpu = float(line.split()[1])
+    return r.stdout, stderr, cpu, time.monotonic() - t0
 
 
 def _durations(ds: Dataset) -> dict[int, int]:
@@ -173,15 +181,15 @@ def main(argv: list[str]) -> int:
     a = ap.parse_args(argv)
     ds = load_set(a.set)
     if a.docker:
-        stdout, stderr, secs = run_docker(ds, a.image)
-        cpu, label = None, "CPU"
+        stdout, stderr, cpu, secs = run_docker(ds, a.image)
+        label = "CPU (container, emulated amd64 on Apple Silicon)"
     else:
         stdout, stderr, cpu = run_native(ds, Path(a.selector), Path(a.src) if a.src else None)
         label = "CPU (native)"
     res = score(stdout, ds)
     print(render(ds, res, stderr, cpu, label))
     if a.docker:
-        print(f"wall (docker): {secs:.1f} s; CPU in container needs the T10 wrapper")
+        print(f"wall (docker): {secs:.1f} s")
     if not res["ok"]:
         return 2
     if res["misses"] and a.set in ("synth-holdout", "stress"):
