@@ -204,3 +204,58 @@ def test_lambda_called_at_import_is_an_import_time_edit():
     called, by_lambda = tp.lambdas()
     assert called and any(k.startswith("sqlglot/parser.py:") for k in called)
     assert any(k.startswith("sqlglot/generators/python.py:") for k in by_lambda)
+
+
+def _distributive_swap():
+    """synth-holdout-2-0165: an AND/OR swap in distributive_law. Two queries reach it; the optimized tree of both
+    changes, the executor result does not."""
+    import difflib
+
+    import diffparse
+    import tpcds_scope
+
+    f = "sqlglot/optimizer/normalize.py"
+    text = (PIN / f).read_text(encoding="utf-8")
+    old = "to_func = exp.and_ if to_exp == exp.And else exp.or_"
+    assert text.count(old) == 1
+    new = text.replace(old, "to_func = exp.and_ if to_exp != exp.And else exp.or_")
+    diff = "".join(difflib.unified_diff(text.splitlines(True), new.splitlines(True), f"a/{f}", f"b/{f}"))
+    changes = diffparse.parse(f"diff --git a/{f} b/{f}\n" + diff)
+    tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
+    sc = tpcds_scope.scope([(c, True) for c in changes], tp, PIN)
+    assert sc.kind == "replay" and sc.plan and set(sc.plan.values()) == {"O"}, sc.why
+    return sc.plan, {f: new}
+
+
+def test_later_seeds_reuse_the_executor_verdict_of_a_tree_an_earlier_seed_passed():
+    """T26: seed 0 runs the executor on each changed optimized tree; later seeds stop after optimize() when the tree
+    digest is one that run passed. The verdicts must be those of five independent replays, and the memo must hold
+    the trees (otherwise the saving is not real)."""
+    plan, patched = _distributive_swap()
+    seeds = sel.replay_seeds(3)
+    plain = [sel._run_replay(plan, patched, PIN, 120, sd)[0] for sd in seeds]
+    memo, chained = None, []
+    for sd in seeds:
+        ok, why, memo = sel._run_replay_ex(plan, patched, PIN, 120, sd, memo)
+        chained.append(ok)
+    assert plain == chained == [True] * len(seeds), (plain, chained)
+    assert memo and all(memo.values()), memo
+
+
+def test_memo_never_hides_a_failure_that_only_some_seeds_show(tmp_path, capsys):
+    """The seed-flaky mutant fails under seed 0 and some others. Carrying the memo along must not turn a failing
+    seed into a pass: a tree the earlier seeds never saw runs in full."""
+    import diffparse
+    import tpcds_scope
+
+    tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
+    changes = diffparse.parse(M.patch_text(str(PIN), "seed_flaky"))
+    sc = tpcds_scope.scope([(c, True) for c in changes], tp, PIN)
+    patched = {c.path_new: diffparse.apply((PIN / c.path_new).read_bytes().decode("utf-8"), c) for c in changes}
+    plain = {sd: sel._run_replay(sc.plan, patched, PIN, 120, sd)[0] for sd in sel.replay_seeds(2)}
+    memo, chained = None, {}
+    for sd in sel.replay_seeds(2):
+        ok, _, memo = sel._run_replay_ex(sc.plan, patched, PIN, 120, sd, memo)
+        chained[sd] = ok
+    assert chained == plain, (plain, chained)
+    assert not all(chained.values())

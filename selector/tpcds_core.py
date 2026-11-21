@@ -250,6 +250,10 @@ class Stop(Exception):
     pass
 
 
+class NeedFull(Exception):
+    """A probe run (no tables loaded) reached a point where the executor must run."""
+
+
 STAGES = ("P", "B", "O", "E", "T")
 # P parse + pickle round trip; B find_tables, ensure_tables, the schema build: everything execute() does
 # before it calls optimize(); O the optimize() call; E plan + executor + result pickle; T transpile.
@@ -257,7 +261,7 @@ STAGES = ("P", "B", "O", "E", "T")
 # means the executor must run. Only a change confined to O can be judged by the optimized tree.
 
 
-def run_query(sql, meta, schema, tables, want=("B", "O", "E", "T"), hook=None, expected=None, stop_at_o=False):
+def run_query(sql, meta, schema, tables, want=("B", "O", "E", "T"), hook=None, expected=None, stop_at_o=False, probe=False):
     """One query through the pipeline. Stage P always runs. `want` names the stages that execute a
     changed line (the recorder asks for all of them).
       B or E wanted, or (with `expected`) a P digest that differs from the pristine one: the executor
@@ -268,6 +272,9 @@ def run_query(sql, meta, schema, tables, want=("B", "O", "E", "T"), hook=None, e
       T (transpile, which only reads the SQL string) runs when wanted, and always after an executor run;
       otherwise only P ran, and its digest decides.
     `stop_at_o` (the recorder) stops after optimize whatever the digest.
+    `probe` (the replay, later seeds): the tables are not touched (execute gets none), which is exact for a run
+      that stops inside optimize; a run that would need the executor raises NeedFull instead and the caller
+      repeats the query without `probe`.
     Returns {stage: digest} for the stages that ran, "ok" (the shared tables and schema came out as
     they went in), "tables" (what find_tables gave), "G" (global fingerprint keyed by stages run).
     `hook(stage)` is called when a stage ends. Raises on any error."""
@@ -295,7 +302,12 @@ def run_query(sql, meta, schema, tables, want=("B", "O", "E", "T"), hook=None, e
     full = runs and (bool(want & {"B", "E"}) or p_diff) and not stop_at_o
     if runs and (full or "O" in want or stop_at_o):
         used = sorted({t.name for t in find_tables(expression)})
-        before = {n: _rows_hash(tables[n]) for n in used}
+        if probe:
+            if full:
+                raise NeedFull()
+            before = {}
+        else:
+            before = {n: _rows_hash(tables[n]) for n in used}
         orig = ex.optimize
         state = {"stopped": False}
 
@@ -307,12 +319,14 @@ def run_query(sql, meta, schema, tables, want=("B", "O", "E", "T"), hook=None, e
             if not full and (stop_at_o or (expected is not None and out["O"] in expected["O"])):
                 state["stopped"] = True
                 raise Stop()
+            if probe:
+                raise NeedFull()
             return res
 
         ex.optimize = optimize
         result = None
         try:
-            result = ex.execute(expression, schema=schema, tables={n: tables[n] for n in used})
+            result = ex.execute(expression, schema=schema, tables={} if probe else {n: tables[n] for n in used})
         except Stop:
             pass
         finally:
@@ -328,6 +342,6 @@ def run_query(sql, meta, schema, tables, want=("B", "O", "E", "T"), hook=None, e
         out["T"] = sha(transpile(sql, write="duckdb")[0])
         end("T")
     out["G"] = {"".join(st for st in "PEOT" if st in out): state_fp()}
-    out["ok"] = all(_rows_hash(tables[n]) == before[n] for n in used) and repr(schema) == schema_before
+    out["ok"] = (probe or all(_rows_hash(tables[n]) == before[n] for n in used)) and repr(schema) == schema_before
     out["tables"] = used
     return out

@@ -188,21 +188,32 @@ def _tpcds_candidate(patch_text: str, src_root: Path, tests: list[dict], maps, c
     return num, sc, patched
 
 
-def _run_replay(plan, patched, src_root: Path, timeout: float, seed: int):
-    """Spawn the replay child; True only when it reports every replayed query identical."""
+def _run_replay_ex(plan, patched, src_root: Path, timeout: float, seed: int, memo=None):
+    """Spawn the replay child; (True, why, memo) only when it reports every replayed query identical.
+    `memo` is what an earlier seed of the same plan learned (optimized trees the executor already passed);
+    the first seed of a plan runs without it, every later seed with it (see tpcds_replay._judge)."""
     job = {"src": str(src_root), "patched": patched, "plan": {str(q): st for q, st in plan.items()},
            "map": str(MAPS_ROOT / "tpcds.z")}
+    if memo is not None:
+        job["memo"] = memo
+        job["lazy"] = True
     env = {"PYTHONHASHSEED": str(seed), "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp"}
     try:
         r = subprocess.run([sys.executable, "-S", str(Path(__file__).resolve().parent / "tpcds_replay.py")],
                            input=json.dumps(job).encode(), capture_output=True, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return False, "replay timed out"
+        return False, "replay timed out", memo
     try:
         out = json.loads(r.stdout.decode().strip().splitlines()[-1])
-        return bool(out["same"]), out["why"]
+        return bool(out["same"]), out["why"], out.get("memo", memo)
     except Exception:
-        return False, f"replay child failed (exit {r.returncode})"
+        return False, f"replay child failed (exit {r.returncode})", memo
+
+
+def _run_replay(plan, patched, src_root: Path, timeout: float, seed: int):
+    """One replay child on its own (no memo): True only when it reports every replayed query identical."""
+    ok, why, _ = _run_replay_ex(plan, patched, src_root, timeout, seed)
+    return ok, why
 
 
 MAPS_ROOT = Path(os.environ.get("BR_MAPS", str(Path(__file__).resolve().parent.parent / "maps")))
@@ -265,12 +276,13 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
     def job(sc, patched, seed, limit):
         w0 = time.monotonic()
         ok, why = True, ""
+        memo = None
         for sd in replay_seeds(seed):
             left = deadline - time.monotonic()
             if left < 3:
                 ok, why = False, "deadline reached before every seed ran"
                 break
-            ok, why = _run_replay(sc.plan, patched, src_root, min(limit, left), sd)
+            ok, why, memo = _run_replay_ex(sc.plan, patched, src_root, min(limit, left), sd, memo)
             if not ok:
                 why += f" [seed {sd}]"
                 break
