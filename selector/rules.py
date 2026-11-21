@@ -184,6 +184,12 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
     out = m.stmt_mask(path, ln)
     if d0:  # def header or decorator: callers run the body, so the def's coverage decides
         out |= ctx.udef(path, d0, d1)
+        if any(l in il for l in range(end + 1, d1 + 1)):  # body lines only: the header always runs at import
+            # a line of the body ran at import time: something calls the function while a module or
+            # class is being built, so a changed decorator or signature changes what every importer
+            # gets (or fails to import). Those lines' test sets say who ran them lazily, not who
+            # depends on them: widen to every test that imports the module.
+            out |= ctx.wide(path)
         name = pyscope.def_name(old_lines[d0 - 1]) if d0 - 1 < len(old_lines) else ""
         if name:
             out |= m.names_attr.get(name, 0)
@@ -356,11 +362,15 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
 
     is_test = path.startswith("tests/") and os.path.basename(path).startswith("test_")
     out = _py_lines(ctx, path, change, old_text.split("\n"), is_test, soft) | sr
-    # A change of what a function binds (a name made local, a yield, a global) acts on every line of
-    # that function, not only on the line edited: every test that ran any of its lines.
-    for lo, hi in pyscope.rebound_spans(old_tree, new_tree):
+    # A change of what a function binds or resolves (a name made local, a yield, a global, a closure) acts on every
+    # line of that function, not only on the line edited: every test that ran any of its lines.
+    try:
+        spans = pyscope.function_hazards(old_text, new_text, old_tree, new_tree, path)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return out | ctx.wide(path), f"R3 {path}: scope table"
+    for lo, hi in spans:
         out |= ctx.udef(path, lo, hi)
-    return out, f"R6/R7 {path}"
+    return out, f"R6/R7 {path}" + (f"; R8 scope change in {len(spans)} function(s)" if spans else "")
 
 
 def _weak(ctx: Ctx, changes) -> int:
