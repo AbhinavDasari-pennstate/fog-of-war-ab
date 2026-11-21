@@ -90,8 +90,11 @@ def rewrite_set_loads(tree, names):
     return R().visit(tree)
 
 
-def wrap_sets(tree, relpath):
-    for stmt, _, _ in set_nodes(tree):
+def wrap_sets(tree, relpath, names):
+    """Register a set only when its name is tracked: a set whose loads are not rewritten must stay unknown to the map."""
+    for stmt, _, name in set_nodes(tree):
+        if name not in names:
+            continue
         stmt.value = _call("_sw", [stmt.value, ast.Constant(value=f"{relpath}:{stmt.lineno}")], stmt.value)
 
 
@@ -99,7 +102,7 @@ def compile_instrumented(data, path, relpath, setnames=frozenset()):
     tree = ast.parse(data, path)
     if relpath.startswith("sqlglot/"):
         tree = transform(tree, relpath)
-        wrap_sets(tree, relpath)
+        wrap_sets(tree, relpath, setnames)
     if setnames:
         tree = rewrite_set_loads(tree, setnames)
     ast.fix_missing_locations(tree)

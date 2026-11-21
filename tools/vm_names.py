@@ -28,6 +28,6 @@ for root in ("sqlglot", "tests"):
             for n in ast.walk(tree):
                 if isinstance(n, (ast.Import, ast.ImportFrom)):
                     for a in n.names:
-                        if a.asname:
+                        if a.asname and a.asname != a.name.split(".")[-1]:
                             aliased.add(a.name.split(".")[-1])
 json.dump(sorted(names - aliased), sys.stdout)

@@ -418,3 +418,12 @@ def test_time_mapping_tokens_pick_the_format_strings_that_contain_them(tmp_path)
     assert v.readers("m.py", 5, "'Y'", False, frozenset({"%Y", "%R"}), 1 << 9) == 0b0110 | (1 << 7) | (1 << 9)
     assert v.readers("m.py", 5, "'Y'", False, frozenset({"zz"}), 0) == 1 << 7  # no recorded string contains it
     assert v.readers("m.py", 5, "'Y'", False, frozenset(), 0) is None
+
+
+def test_a_set_is_registered_only_when_its_name_is_tracked():
+    import vm_transform as vt
+
+    tree = ast.parse('A = {"x"}\nB = {"y"}\n')
+    vt.wrap_sets(tree, "m.py", {"A"})
+    out = ast.unparse(tree)
+    assert "_sw({'x'}, 'm.py:1')" in out and "B = {'y'}" in out
