@@ -118,7 +118,7 @@ def _tokens(texts):
     return {t for t in pyscope.names_in(texts) if t not in STOP and not t.isdigit()}
 
 
-def _mentions(ctx: Ctx, names) -> int:
+def _mentions(ctx: Ctx, names, in_class: bool) -> int:
     """Tests that depend on class- or module-level statements that mention a changed name."""
     files, idx = ctx.m.mentions
     out = 0
@@ -126,8 +126,8 @@ def _mentions(ctx: Ctx, names) -> int:
         for code in idx.get(n, ()):
             f, ln = files[code // 100000], code % 100000
             s = ctx.m.stmt(f, ln)
-            if s is None:
-                continue
+            if s is None or (in_class and s[2] == "function"):
+                continue  # import-time helpers read a class attribute for that class: its users cover it
             if s[5]:
                 out |= ctx.m.names_class.get(s[5], 0) or ctx.m.files.get(f, 0)
             else:
@@ -160,8 +160,10 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
     diff = set(_tokens(removed_texts)) ^ set(_tokens(added_texts))
     if ln == start and _TARGET.match(first):
         diff.add(_TARGET.match(first).group(1))
-    out |= _mentions(ctx, diff)
-    # B: tests that ran a line naming the assigned attribute or a changed name or key
+    out |= _mentions(ctx, diff, bool(cls))
+    # B: tests that ran a line naming the assigned attribute or a changed name or key. Not an
+    # upper bound: class attributes are often read once at class creation (metaclass), so a
+    # class-level change selects every test that uses the class or a subclass.
     names = _tokens(texts)
     t = _TARGET.match(first)
     if t:
@@ -169,13 +171,11 @@ def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_text
     b = 0
     for n in names:
         b |= m.names_attr.get(n, 0)
-    # A: tests that used the enclosing class (or a subclass); a test is hit only if it does both
     a = m.names_class.get(cls, 0) if cls else 0
     if a:
-        out |= (a & b) if b else a
+        out |= a
     else:
-        f = m.files.get(path, 0)
-        out |= (f & b) if (b and f) else (b or f)
+        out |= b | m.files.get(path, 0)
     if out == 0:
         out = ctx.wide(path)
     return out

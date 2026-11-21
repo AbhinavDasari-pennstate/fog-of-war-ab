@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build maps/mentions.bin: for each name defined at class or module level (a key of names_attr),
 the class-level and module-level source lines of sqlglot/ that mention it (definitions of the
-same name excluded). Lines inside function bodies are left out: tests that ran them are in
-names_attr already. Pinned-commit map; run on the laptop.
+same name excluded). Function-body lines are left out unless they ran at import time: tests that ran the others are
+in names_attr already. Pinned-commit map; run on the laptop.
 
     python3 tools/build_mentions.py --src ../sqlglot-pin --maps maps
 """
@@ -38,7 +38,7 @@ def main():
         lines = (Path(a.src) / f).read_text("utf-8").split("\n")
         for ln, text in enumerate(lines, 1):
             s = m.stmt(f, ln)
-            if s is None or s[2] == "function":
+            if s is None or (s[2] == "function" and ln not in m.importtime.get(f, ())):
                 continue
             for tok in pyscope.names_in([text]) & names:
                 if re.match(r"^\s*" + re.escape(tok) + r"\s*(?::|=(?!=))", text):
