@@ -185,6 +185,17 @@ def set_entries(old_tree, new_tree, diffs):
     return sorted(out.items())
 
 
+_CACHE = {}
+
+
+def cached(maps_dir: str):
+    """One Val per maps directory and process: the map is decoded once, not once per commit."""
+    v = _CACHE.get(maps_dir)
+    if v is None:
+        v = _CACHE[maps_dir] = Val(maps_dir)
+    return v
+
+
 class Val:
     def __init__(self, maps_dir: str):
         self.ok = False

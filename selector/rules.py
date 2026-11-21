@@ -82,7 +82,7 @@ class Ctx:
 
     def val(self):
         if self._val is None:
-            self._val = valrule.Val(self.m.dir)
+            self._val = valrule.cached(self.m.dir)
         return self._val
 
     def note(self, s: str):
