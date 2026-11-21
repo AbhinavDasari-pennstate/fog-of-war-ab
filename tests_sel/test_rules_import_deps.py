@@ -15,6 +15,7 @@ import pytest
 from conftest import KIT, PIN, ROOT, make_patch, needs_kit, needs_pin
 
 sys.path.insert(0, str(ROOT))
+import pyscope  # noqa: E402
 import rules  # noqa: E402
 
 PATH = "sqlglot/thing.py"
@@ -42,8 +43,12 @@ class Stub:
         return self.sets[self.lines[path].get(line, 0)]
 
 
-def run(maps, probe=0, s=S):
+TEXT = "\n".join(["# 1", "# 2", "# 3", "# 4", "def f(x):", "    a = x", '    return a or "?"', "    # 8", "    # 9", ""])  # f: lines 5-7
+
+
+def run(maps, probe=0, s=S, text=TEXT):
     ctx = rules.Ctx(maps, TESTS, "/nonexistent")
+    ctx.old_tree = pyscope.parse(text, PATH) if text is not None else None
     ctx._probe = False if probe is None else {"mask": probe}  # False: the probe could not run
     return rules._func_level(ctx, PATH, s)
 
@@ -94,8 +99,19 @@ def test_a_function_ranged_in_a_base_module_adds_test_lazy_load():
 def test_importers_that_cover_the_wide_answer_skip_the_probe():
     # nothing is gained over `wide`, so the probe's CPU is not spent
     ctx = rules.Ctx(Stub({PATH: [(5, 9, [M1])]}, imports={PATH: WIDE, M1: WIDE}), TESTS, "/nonexistent")
+    ctx.old_tree = pyscope.parse(TEXT, PATH)
     ctx.probe_mask = lambda: pytest.fail("the probe was asked")
     assert rules._func_level(ctx, PATH, S) == WIDE
+
+
+def test_a_cached_function_keeps_the_wide_answer():
+    text = "# 1\n# 2\n# 3\n@functools.lru_cache(maxsize=None)\ndef f(x):\n    a = x\n    return a or '?'\n"
+    assert run(Stub({PATH: [(4, 7, [M1])]}), text=text) == WIDE
+    assert run(Stub({PATH: [(4, 7, [M1])]}), text=text.replace("@functools.lru_cache(maxsize=None)", "@staticmethod")) == 0b1 | 0b1100
+
+
+def test_without_the_parsed_old_file_the_wide_answer_stays():
+    assert run(Stub({PATH: [(5, 9, [M1])]}), text=None) == WIDE
 
 
 def test_a_line_that_did_not_run_at_import_is_untouched():
@@ -188,9 +204,7 @@ def test_noise_a_comment_only_edit_of_the_same_function_selects_as_before():
 
     rel = "sqlglot/expressions/core.py"
     old = (PIN / rel).read_text("utf-8")
-    new = old.replace('        return self.text("this") or "?"
-', '        return self.text("this") or "?"  # same
-', 1)
+    new = old.replace('        return self.text("this") or "?"\n', '        return self.text("this") or "?"  # same\n', 1)
     assert new != old
     tests = json.loads((KIT / "sample" / "tests.json").read_text("utf-8"))["tests"]
     got, why = rules.select(diffparse.parse(make_patch(rel, old, new)), load(str(ROOT / "maps")), tests, src_root=PIN)

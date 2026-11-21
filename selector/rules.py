@@ -202,8 +202,8 @@ class Ctx:
         pass, fewer than three seeds), no range for the lines, a call made by collection itself ("<nomod>"), a module body the import map
         does not know (a test module), or a probe that cannot run."""
         w = getattr(self.m, "impfn", None)
-        if w is None:
-            return self.wide(path)
+        if w is None or self.old_tree is None or _cached_def(self.old_tree, lo, hi):
+            return self.wide(path)  # a cached def's results outlive the import that computed them: every importer
         ranges, base = w
         rs = ranges.get(path)
         hit = [(a, b) for a, b, _ in rs if a <= hi and lo <= b] if rs else []
@@ -244,6 +244,19 @@ class Ctx:
             if sid:
                 u |= sets[sid]
         return u
+
+
+_CACHE_DECORATOR = re.compile(r"cache|memo|lru|once", re.I)
+
+
+def _cached_def(tree, lo: int, hi: int) -> bool:
+    """True when a def around lines lo..hi carries a decorator that looks like a cache (functools.cache, lru_cache, memoize, once)."""
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.decorator_list:
+            around = min(d.lineno for d in n.decorator_list) <= hi and lo <= (n.end_lineno or n.lineno)
+            if around and any(_CACHE_DECORATOR.search(ast.unparse(d)) for d in n.decorator_list):
+                return True
+    return False
 
 
 def _blocks(change):
