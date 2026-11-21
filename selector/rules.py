@@ -40,16 +40,31 @@ def _bits(mask: int) -> set:
     return out
 
 
+_INDEX: dict = {}  # id(tests) -> (tests, len, first, last, all, by_file)
+
+
+def _index(tests):
+    """(bitmask of every test, {file: bitmask of its tests}); built once for a tests list, not once per Ctx."""
+    hit = _INDEX.get(id(tests))
+    if hit is not None and hit[0] is tests and hit[1] == len(tests) and hit[2] is (tests[0] if tests else None)             and hit[3] is (tests[-1] if tests else None):
+        return hit[4], hit[5]
+    all_ = 0
+    by_file: dict[str, int] = {}
+    for t in tests:
+        all_ |= 1 << t["number"]
+        by_file[t["file"]] = by_file.get(t["file"], 0) | (1 << t["number"])
+    if len(_INDEX) >= 4:
+        _INDEX.pop(next(iter(_INDEX)))
+    _INDEX[id(tests)] = (tests, len(tests), tests[0] if tests else None, tests[-1] if tests else None, all_, by_file)
+    return all_, by_file
+
+
 class Ctx:
     def __init__(self, maps, tests, src_root):
         self.m = maps
         self.src = Path(src_root)
         self.tests = tests
-        self.all = 0
-        self.by_file: dict[str, int] = {}
-        for t in tests:
-            self.all |= 1 << t["number"]
-            self.by_file[t["file"]] = self.by_file.get(t["file"], 0) | (1 << t["number"])
+        self.all, self.by_file = _index(tests)
         self.notes: list[str] = []
         self.single = False  # the patch changes one file
         self.narrow = None  # (start line, mask) of a class-level assignment narrowed by maps/attrreads.bin
@@ -608,7 +623,7 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
     if not is_py:
         return _data_file(ctx, path, change)
     sr = m.srcreaders.get(path, 0)
-    old_text = (ctx.src / path).read_bytes().decode("utf-8")
+    old_text = diffparse.read_text(ctx.src / path)
     new_text = diffparse.apply(old_text, change)  # PatchError means R9 in the caller
     if pyscope.cookie(old_text) != pyscope.cookie(new_text):
         return ctx.wide(path) | sr, f"R3 {path}: encoding declaration changed"
@@ -648,7 +663,7 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
     ctx.doc_only = _doc_only(old_tree, diffs)
     if ctx.single and path.startswith("sqlglot/"):
         try:
-            f = attrrule.find(old_tree, new_tree, old_text)
+            f = attrrule.find(old_tree, new_tree, old_text, new_text)
             if f:
                 got = ctx.attr().readers(path, f[1], f[2])
                 if got is not None:
@@ -681,7 +696,7 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
     # A change of what a function binds or resolves (a name made local, a yield, a global, a closure) acts on every
     # line of that function, not only on the line edited: every test that ran any of its lines.
     try:
-        spans = pyscope.function_hazards(old_text, new_text, old_tree, new_tree, path)
+        spans = pyscope.function_hazards(old_text, new_text, old_tree, new_tree, path, str(ctx.src / path))
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return out | ctx.wide(path), f"R3 {path}: scope table"
     for lo, hi in spans:
@@ -699,7 +714,7 @@ def _weak(ctx: Ctx, changes) -> int:
     if ch.status != "modified" or ch.path_old != path or not path.startswith("sqlglot/") or not path.endswith(".py"):
         return 0
     try:
-        old_text = (ctx.src / path).read_bytes().decode("utf-8")
+        old_text = diffparse.read_text(ctx.src / path)
         new_text = diffparse.apply(old_text, ch)
         if pyscope.cookie(old_text) != pyscope.cookie(new_text):
             return 0

@@ -23,7 +23,6 @@ widen:
 import ast
 import json
 import zlib
-from dataclasses import dataclass
 
 import diffparse
 import pyscope
@@ -38,11 +37,21 @@ _FUNC = (ast.FunctionDef, ast.AsyncFunctionDef)
 STAGES = "PBOET"  # parse + pickle; find_tables, ensure_tables, schema build; optimize(); plan + executor; transpile
 
 
-@dataclass
 class Scope:
-    kind: str  # "keep" | "replay"
-    plan: dict = None  # query number -> stages ("P", "O", "E", "T") whose coverage reaches a change
-    why: str = ""
+    def __init__(self, kind, plan=None, why=""):
+        self.kind = kind  # "keep" | "replay"
+        self.plan = plan  # query number -> stages ("P", "O", "E", "T") whose coverage reaches a change
+        self.why = why
+
+    def __eq__(self, other):
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return (self.kind, self.plan, self.why) == (other.kind, other.plan, other.why)
+
+    __hash__ = None
+
+    def __repr__(self):
+        return f"Scope(kind={self.kind!r}, plan={self.plan!r}, why={self.why!r})"
 
     @property
     def mask(self) -> int:
@@ -207,7 +216,7 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
     from pathlib import Path
 
     path = change.path_new
-    old_text = (Path(src_root) / path).read_bytes().decode("utf-8")
+    old_text = diffparse.read_text(Path(src_root) / path)
     new_text = diffparse.apply(old_text, change)
     try:
         old_tree = ast.parse(old_text, path)

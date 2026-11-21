@@ -9,6 +9,9 @@ RUN python /tmp/fetch_sqlglot.py /app/sqlglot-src && rm /tmp/fetch_sqlglot.py
 COPY selector /app/selector
 COPY maps /app/maps
 RUN python -m compileall -q /app/selector /app/maps /app/sqlglot-src && chmod -R a+rX /app
+# The base image ships the standard library without .pyc files and the run has a read-only disk, so every run would
+# compile ast, json, threading and more from source again (about 50 ms of CPU, charged to the score).
+RUN python -m compileall -q -x 'site-packages|idlelib|tkinter|turtledemo|ensurepip|lib2to3' /usr/local/lib/python3.13 || true
 
 ENV PYTHONDONTWRITEBYTECODE=1
 CMD ["python", "-S", "-E", "/app/selector/main.py"]

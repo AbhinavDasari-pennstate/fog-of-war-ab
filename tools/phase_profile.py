@@ -141,7 +141,24 @@ ast.parse = ast_parse
 ast.dump = ast_dump
 builtins.compile = compile_
 
-wrap(ML, "_read", "map_load")
+if os.environ.get("PHASE_FINE") == "1":
+    # finer split: one phase per map file and per weakmut step (the totals stay the same, only the names change)
+    _r = ML._read
+
+    def _read_named(d, name):
+        push("map:" + name)
+        try:
+            return _r(d, name)
+        finally:
+            pop()
+
+    ML._read = _read_named
+    wrap(weakmut, "find_mutation", "wm_find")
+    wrap(weakmut, "collect", "wm_collect")
+    wrap(weakmut, "writes_shared_state", "wm_shared")
+    wrap(weakmut.Profile, "droppable_tests", "wm_droppable")
+else:
+    wrap(ML, "_read", "map_load")
 wrap(ML.Maps, "__init__", "map_load")
 for _p in ("seqcredit", "importtime", "mentions", "weakmut"):
     wrap_prop(ML.Maps, _p, "map_load")

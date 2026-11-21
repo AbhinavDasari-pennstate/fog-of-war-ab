@@ -4,30 +4,50 @@ parse(patch_text) -> list[FileChange]; apply(original_text, change) -> new_text.
 Both raise PatchError on anything unexpected; callers fall back to the widest answer.
 """
 
+import os
 import re
-from dataclasses import dataclass, field
 
 
 class PatchError(Exception):
     pass
 
 
-@dataclass
-class Hunk:
-    old_start: int
-    old_count: int
-    new_start: int
-    new_count: int
-    lines: list[tuple[str, str]] = field(default_factory=list)  # (" " | "-" | "+", text)
-    no_newline: bool = False  # a "\ No newline at end of file" marker was seen
+class _Record:
+    """What @dataclass gave these two classes (init, eq, repr) without importing dataclasses, which pulls in inspect,
+    typing and dis: tens of milliseconds of start-up CPU for a batch that parses a few small patches."""
+
+    _FIELDS = ()
+    __hash__ = None
+
+    def __eq__(self, other):
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return all(getattr(self, f) == getattr(other, f) for f in self._FIELDS)
+
+    def __repr__(self):
+        return f"{self.__class__.__qualname__}(" + ", ".join(f"{f}={getattr(self, f)!r}" for f in self._FIELDS) + ")"
 
 
-@dataclass
-class FileChange:
-    path_old: str
-    path_new: str
-    status: str  # modified | added | deleted | renamed | binary
-    hunks: list[Hunk] = field(default_factory=list)
+class Hunk(_Record):
+    _FIELDS = ("old_start", "old_count", "new_start", "new_count", "lines", "no_newline")
+
+    def __init__(self, old_start, old_count, new_start, new_count, lines=None, no_newline=False):
+        self.old_start = old_start
+        self.old_count = old_count
+        self.new_start = new_start
+        self.new_count = new_count
+        self.lines = [] if lines is None else lines  # (" " | "-" | "+", text)
+        self.no_newline = no_newline  # a "\ No newline at end of file" marker was seen
+
+
+class FileChange(_Record):
+    _FIELDS = ("path_old", "path_new", "status", "hunks")
+
+    def __init__(self, path_old, path_new, status, hunks=None):
+        self.path_old = path_old
+        self.path_new = path_new
+        self.status = status  # modified | added | deleted | renamed | binary
+        self.hunks = [] if hunks is None else hunks
 
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -104,8 +124,43 @@ def parse(patch_text: str) -> list[FileChange]:
     return changes
 
 
+_APPLIED: dict = {}  # (id(original), id(change)) -> (original, change, patched text)
+_READ: dict = {}  # path -> ((mtime_ns, size), text)
+_MEMO_MAX = 8
+
+
+def read_text(path) -> str:
+    """The UTF-8 text of a file, read again only when its size or modification time changed: the same source file is
+    wanted by several rules of one run, and opening a 300 KB file costs about as much as parsing a small patch."""
+    p = os.fspath(path)
+    st = os.stat(p)
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _READ.get(p)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    with open(p, "rb") as fh:
+        text = fh.read().decode("utf-8")
+    if len(_READ) >= _MEMO_MAX:
+        _READ.pop(next(iter(_READ)))
+    _READ[p] = (key, text)
+    return text
+
+
 def apply(original: str, change: FileChange) -> str:
-    """Apply a modified-file change to the original text."""
+    """Apply a modified-file change to the original text (remembered for the same two objects: rules, the weak
+    mutation rule and the TPC-DS scope each ask for the same patched file)."""
+    key = (id(original), id(change))
+    hit = _APPLIED.get(key)
+    if hit is not None and hit[0] is original and hit[1] is change:
+        return hit[2]
+    out = _apply(original, change)
+    if len(_APPLIED) >= _MEMO_MAX:
+        _APPLIED.pop(next(iter(_APPLIED)))
+    _APPLIED[key] = (original, change, out)
+    return out
+
+
+def _apply(original: str, change: FileChange) -> str:
     if change.status != "modified" or not change.hunks:
         raise PatchError(f"cannot apply a {change.status} change")
     if any(h.no_newline for h in change.hunks) or not original.endswith("\n"):

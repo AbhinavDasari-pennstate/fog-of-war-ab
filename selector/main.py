@@ -12,7 +12,6 @@ import ast
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 import zlib
@@ -61,9 +60,23 @@ def _is_noop(change: "diffparse.FileChange", src_root: Path) -> tuple[bool, str]
 _FULL: dict[int, list[list[int]]] = {}
 
 
+_DUR: dict = {}  # id(tests) -> (tests, len, durations in ms)
+
+
+def _dur(tests: list[dict]) -> dict:
+    """{test number: milliseconds}, computed once for a tests list (every _pack asked for it again)."""
+    hit = _DUR.get(id(tests))
+    if hit is not None and hit[0] is tests and hit[1] == len(tests):
+        return hit[2]
+    out = {t["number"]: round(t["seconds"] * 1000 + 1e-9) for t in tests}
+    _DUR.clear()
+    _DUR[id(tests)] = (tests, len(tests), out)
+    return out
+
+
 def _full(tests: list[dict]) -> list[list[int]]:
     """Every test packed; computed once per tests list."""
-    durations = {t["number"]: round(t["seconds"] * 1000 + 1e-9) for t in tests}
+    durations = _dur(tests)
     key = hash(tuple(durations.items()))
     if key not in _FULL:
         _FULL[key] = pack.pack(durations)
@@ -71,8 +84,29 @@ def _full(tests: list[dict]) -> list[list[int]]:
 
 
 def _pack(selected, tests: list[dict]) -> list[list[int]]:
-    dur = {t["number"]: round(t["seconds"] * 1000 + 1e-9) for t in tests}
+    dur = _dur(tests)
     return pack.pack({n: dur[n] for n in selected if n in dur})
+
+
+_RSS_LIMIT = [500 << 20]
+
+
+def _rss_bytes() -> int:
+    try:
+        with open("/proc/self/statm", "rb") as fh:
+            return int(fh.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except Exception:  # no /proc here: the valve stays shut
+        return 0
+
+
+def _collect_if_large() -> None:
+    """The cycle collector is off for speed (main). A few helpers leave closures that point at themselves, and such a
+    cycle can hold a whole parsed file: when the process has grown large, collect once and wait for 300 MB more."""
+    if _rss_bytes() > _RSS_LIMIT[0]:
+        import gc
+
+        gc.collect()
+        _RSS_LIMIT[0] = max(500 << 20, _rss_bytes() + (300 << 20))
 
 
 def decide(patch_text: str, src_root: Path, tests: list[dict], maps=None) -> list[list[int]]:
@@ -182,7 +216,7 @@ def _tpcds_candidate(patch_text: str, src_root: Path, tests: list[dict], maps, c
             depends = True
         per_file.append((ch, depends))
         if ch.status == "modified" and ch.path_new == ch.path_old and ch.path_new.startswith("sqlglot/") and ch.path_new.endswith(".py"):
-            old = (src_root / ch.path_new).read_bytes().decode("utf-8")
+            old = diffparse.read_text(src_root / ch.path_new)
             patched[ch.path_new] = diffparse.apply(old, ch)
     sc = tpcds_scope.scope(per_file, tp, src_root)
     return num, sc, patched
@@ -197,6 +231,8 @@ def _run_replay_ex(plan, patched, src_root: Path, timeout: float, seed: int, mem
     if memo is not None:
         job["memo"] = memo
     env = {"PYTHONHASHSEED": str(seed), "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp"}
+    import subprocess  # only a batch that replays pays for importing it
+
     try:
         r = subprocess.run([sys.executable, "-S", str(Path(__file__).resolve().parent / "tpcds_replay.py")],
                            input=json.dumps(job).encode(), capture_output=True, env=env, timeout=timeout)
@@ -207,6 +243,29 @@ def _run_replay_ex(plan, patched, src_root: Path, timeout: float, seed: int, mem
         return bool(out["same"]), out["why"], out.get("memo", memo)
     except Exception:
         return False, f"replay child failed (exit {r.returncode})", memo
+
+
+class _LazyPool:
+    """Two worker threads, started when the first replay is submitted: a batch whose replays the budgets all refuse
+    never imports concurrent.futures (threading, logging, queue and more, about 30 ms of CPU)."""
+
+    def __init__(self):
+        self.pool = None
+
+    def submit(self, *args, **kwargs):
+        if self.pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self.pool = ThreadPoolExecutor(max_workers=2)
+        return self.pool.submit(*args, **kwargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.pool is not None:
+            self.pool.shutdown(wait=True)
+        return False
 
 
 def _run_replay(plan, patched, src_root: Path, timeout: float, seed: int):
@@ -229,6 +288,9 @@ def _load_tpcds():
 
 
 def main(data: Path = DATA, src_root: Path = SRC) -> None:
+    import gc
+
+    gc.disable()  # a short batch process: the trees it builds hold no cycles, and collection passes over them cost CPU
     tests = json.loads((data / "tests.json").read_text(encoding="utf-8"))["tests"]
     maps = _load_maps(tests)
     tp = _load_tpcds() if maps is not None and os.environ.get("BR_NO_REPLAY") != "1" else None
@@ -244,6 +306,7 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
         except Exception as exc:  # one full-suite line per commit, whatever happens
             print(f"  fallback to all tests: {type(exc).__name__}: {exc}", file=sys.stderr)
             workers = _full(tests)
+        _collect_if_large()
         rows[patch.stem] = workers
         if tp is not None and workers and text is not None:
             try:
@@ -259,63 +322,63 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
                 print(f"  tpcds refine failed ({type(exc).__name__}: {exc}): giant stays", file=sys.stderr)
     # replays, cheapest first, inside the budgets; two at a time (the container has 2 cores). Which
     # replays are submitted depends only on the estimates, so the same batch gets the same decisions.
-    wall0 = time.monotonic()
-    spent = 0.0
-    import resource
-    from concurrent.futures import ThreadPoolExecutor
+    if pending:  # a batch with no replay never imports subprocess or concurrent.futures
+        import pyscope
 
-    base_cpu = lambda: (lambda r: r.ru_utime + r.ru_stime)(resource.getrusage(resource.RUSAGE_CHILDREN))  # noqa: E731
-    pending.sort(key=lambda x: (x[0], x[1]))  # cheapest first: the budget buys the most drops
-    jobs = []  # (commit, num, chosen, future, est)
+        pyscope.clear_caches()  # the replay children need the memory
+        wall0 = time.monotonic()
+        spent = 0.0
+        pending.sort(key=lambda x: (x[0], x[1]))  # cheapest first: the budget buys the most drops
+        jobs = []  # (commit, num, chosen, future, est)
 
-    # One absolute deadline for the whole replay phase: 90 s of replay, and never past 150 s after the
-    # selector started (the batch limit is 3 minutes). A seed that cannot finish before it keeps the giant.
-    deadline = min(wall0 + REPLAY_PHASE_S, T_START + REPLAY_EMERGENCY_WALL_S)
+        # One absolute deadline for the whole replay phase: 90 s of replay, and never past 150 s after the
+        # selector started (the batch limit is 3 minutes). A seed that cannot finish before it keeps the giant.
+        deadline = min(wall0 + REPLAY_PHASE_S, T_START + REPLAY_EMERGENCY_WALL_S)
 
-    def job(sc, patched, seed, limit):
-        w0 = time.monotonic()
-        ok, why = True, ""
-        memo = None
-        for sd in replay_seeds(seed):
-            left = deadline - time.monotonic()
-            if left < 3:
-                ok, why = False, "deadline reached before every seed ran"
-                break
-            ok, why, memo = _run_replay_ex(sc.plan, patched, src_root, min(limit, left), sd, memo)
-            if not ok:
-                why += f" [seed {sd}]"
-                break
-        return ok, why + f"; {len(sc.plan)} queries x {REPLAY_SEEDS} seeds, est {{est:.1f}}s, wall {time.monotonic() - w0:.1f}s"
+        def job(sc, patched, seed, limit):
+            w0 = time.monotonic()
+            ok, why = True, ""
+            memo = None
+            for sd in replay_seeds(seed):
+                left = deadline - time.monotonic()
+                if left < 3:
+                    ok, why = False, "deadline reached before every seed ran"
+                    break
+                ok, why, memo = _run_replay_ex(sc.plan, patched, src_root, min(limit, left), sd, memo)
+                if not ok:
+                    why += f" [seed {sd}]"
+                    break
+            return ok, why + f"; {len(sc.plan)} queries x {REPLAY_SEEDS} seeds, est {{est:.1f}}s, wall {time.monotonic() - w0:.1f}s"
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        for est, commit, num, sc, patched, chosen in pending:
-            gain = (_cost(_pack(chosen, tests), dur) - _cost(_pack(chosen - {num}, tests), dur)) / 1000.0
-            if BOARD_K * est > gain * REPLAY_WORTH:
-                print(f"{commit}: tpcds replay est {est:.1f}s vs giant {gain:.1f}s: giant stays", file=sys.stderr)
-                continue
-            if not sc.plan:
-                rows[commit] = _pack(chosen - {num}, tests)
-                print(f"{commit}: tpcds replay identical: giant dropped (no query reaches the changed code)", file=sys.stderr)
-                continue
-            if spent + est > REPLAY_EST_BUDGET_S:
-                print(f"{commit}: tpcds replay estimate budget spent: giant stays", file=sys.stderr)
-                continue
-            left_wall = deadline - time.monotonic()
-            if left_wall < 5:
-                print(f"{commit}: tpcds replay emergency wall stop: giant stays", file=sys.stderr)
-                continue
-            spent += est
-            seed = zlib.crc32(commit.encode()) % 8
-            jobs.append((commit, num, chosen, pool.submit(job, sc, patched, seed, REPLAY_PER_SEED_S), est))
-        for commit, num, chosen, fut, est in jobs:
-            try:
-                ok, why = fut.result()
-            except BaseException as exc:  # any failure of the replay machinery keeps the giant
-                ok, why = False, f"replay machinery failed: {type(exc).__name__}"
-            why = why.replace("{est:.1f}", f"{est:.1f}")
-            print(f"{commit}: tpcds replay {'identical: giant dropped' if ok else 'giant stays'} ({why})", file=sys.stderr)
-            if ok:
-                rows[commit] = _pack(chosen - {num}, tests)
+        with _LazyPool() as pool:
+            for est, commit, num, sc, patched, chosen in pending:
+                gain = (_cost(_pack(chosen, tests), dur) - _cost(_pack(chosen - {num}, tests), dur)) / 1000.0
+                if BOARD_K * est > gain * REPLAY_WORTH:
+                    print(f"{commit}: tpcds replay est {est:.1f}s vs giant {gain:.1f}s: giant stays", file=sys.stderr)
+                    continue
+                if not sc.plan:
+                    rows[commit] = _pack(chosen - {num}, tests)
+                    print(f"{commit}: tpcds replay identical: giant dropped (no query reaches the changed code)", file=sys.stderr)
+                    continue
+                if spent + est > REPLAY_EST_BUDGET_S:
+                    print(f"{commit}: tpcds replay estimate budget spent: giant stays", file=sys.stderr)
+                    continue
+                left_wall = deadline - time.monotonic()
+                if left_wall < 5:
+                    print(f"{commit}: tpcds replay emergency wall stop: giant stays", file=sys.stderr)
+                    continue
+                spent += est
+                seed = zlib.crc32(commit.encode()) % 8
+                jobs.append((commit, num, chosen, pool.submit(job, sc, patched, seed, REPLAY_PER_SEED_S), est))
+            for commit, num, chosen, fut, est in jobs:
+                try:
+                    ok, why = fut.result()
+                except BaseException as exc:  # any failure of the replay machinery keeps the giant
+                    ok, why = False, f"replay machinery failed: {type(exc).__name__}"
+                why = why.replace("{est:.1f}", f"{est:.1f}")
+                print(f"{commit}: tpcds replay {'identical: giant dropped' if ok else 'giant stays'} ({why})", file=sys.stderr)
+                if ok:
+                    rows[commit] = _pack(chosen - {num}, tests)
     for commit in sorted(rows):
         print(json.dumps({"commit": commit, "workers": rows[commit]}))
     print(f"v0 done: {len(tests)} tests known", file=sys.stderr)
