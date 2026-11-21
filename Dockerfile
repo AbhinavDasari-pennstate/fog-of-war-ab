@@ -7,7 +7,8 @@ COPY tools/fetch_sqlglot.py /tmp/fetch_sqlglot.py
 RUN python /tmp/fetch_sqlglot.py /app/sqlglot-src && rm /tmp/fetch_sqlglot.py
 
 COPY selector /app/selector
-RUN python -m compileall -q /app/selector && chmod -R a+rX /app
+COPY maps /app/maps
+RUN python -m compileall -q /app/selector /app/maps && chmod -R a+rX /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 CMD ["python", "-S", "-E", "/app/selector/main.py"]
