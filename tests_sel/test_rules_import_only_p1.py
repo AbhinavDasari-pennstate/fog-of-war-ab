@@ -109,6 +109,6 @@ def test_reserved_keyword_entry_does_not_credit_the_first_importers():
     lines[600] = lines[600].replace("varchar", "zarchar")
     got, why = rules.select(diffparse.parse(make_patch(rel, old, "\n".join(lines))), maps, tests, src_root=PIN)
     ids = {t["id"]: t["number"] for t in tests}
-    assert "L2" in why
+    assert "L2" in why or why.startswith("V "), why  # T29: a word lookup map now answers this edit before L2 does
     assert ids[TPCDS] not in got, "the first importer of mysql.py (the TPC-DS giant) is still credited"
     assert len(got) < 190
