@@ -128,12 +128,29 @@ REPLAY_EMERGENCY_WALL_S = float(os.environ.get("BR_REPLAY_WALL", "140"))
 REPLAY_PER_COMMIT_S = float(os.environ.get("BR_REPLAY_COMMIT", "40"))
 # The replay must cost clearly less than the giant it replaces (build-machine seconds x slack).
 # The board charges CPU at about BOARD_K times the native seconds measured here (v2: 0.6 s native, 1.10 on the board).
-BOARD_K = float(os.environ.get("BR_K", "4"))
+BOARD_K = float(os.environ.get("BR_K", "2.5"))
 # A replay is run only when its estimated CPU is below this share of the simulated seconds the drop
 # saves (est is native CPU; the board multiplies it by BOARD_K).
 REPLAY_WORTH = 0.8
+# One hash seed is not enough: a patch can fail only under some PYTHONHASHSEEDs (set iteration order), pass
+# under the seed the replay happened to use, and be dropped while the real test fails (synth-dev-1-0140 fails
+# under 7 of 10 seeds). Every plan is replayed under this many different seeds, each in its own interpreter;
+# one difference keeps the test.
+REPLAY_SEEDS = int(os.environ.get("BR_SEEDS", "5"))
 REPLAY_SLACK = 1.05  # est is calibrated; this covers the spread
 REPLAY_OVERHEAD_S = 1.0
+
+
+def replay_seeds(commit_seed: int) -> list:
+    """The PYTHONHASHSEEDs a plan is replayed under: 0 (the seed most harnesses and labellers pin), 1, 2, 3,
+    the commit's own (crc32 mod 8), then 4, 5 ... until there are REPLAY_SEEDS distinct ones."""
+    out = []
+    for sd in (0, 1, 2, 3, commit_seed, 4, 5, 6, 7):
+        if sd not in out:
+            out.append(sd)
+        if len(out) >= REPLAY_SEEDS:
+            break
+    return out
 
 
 def _cost(workers, dur) -> int:
@@ -224,7 +241,7 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
                     num, sc, patched = cand
                     print(f"  tpcds: {sc.kind} {sc.why[:200]}", file=sys.stderr)
                     if sc.kind == "replay":
-                        est = tp.cost(sc.plan) * REPLAY_SLACK if sc.plan else 0.0
+                        est = tp.cost(sc.plan) * REPLAY_SLACK * REPLAY_SEEDS if sc.plan else 0.0
                         pending.append((est, patch.stem, num, sc, patched, chosen))
             except Exception as exc:
                 print(f"  tpcds refine failed ({type(exc).__name__}: {exc}): giant stays", file=sys.stderr)
@@ -241,8 +258,13 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
 
     def job(sc, patched, seed, limit):
         w0 = time.monotonic()
-        ok, why = _run_replay(sc.plan, patched, src_root, limit, seed)
-        return ok, why + f"; {len(sc.plan)} queries, est {{est:.1f}}s, wall {time.monotonic() - w0:.1f}s"
+        ok, why = True, ""
+        for sd in replay_seeds(seed):
+            ok, why = _run_replay(sc.plan, patched, src_root, limit, sd)
+            if not ok:
+                why += f" [seed {sd}]"
+                break
+        return ok, why + f"; {len(sc.plan)} queries x {REPLAY_SEEDS} seeds, est {{est:.1f}}s, wall {time.monotonic() - w0:.1f}s"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         for est, commit, num, sc, patched, chosen in pending:

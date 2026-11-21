@@ -35,7 +35,7 @@ if hasattr(ast, "TryStar"):
 _FUNC = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
-STAGES = "POET"  # parse + pickle, find_tables + optimize, plan + executor, transpile
+STAGES = "PBOET"  # parse + pickle; find_tables, ensure_tables, schema build; optimize(); plan + executor; transpile
 
 
 @dataclass
@@ -83,9 +83,13 @@ class TpcdsMap:
         need = set()
         for i, st in plan.items():
             sc = self.q[i]["stage_cpu"]
-            ran = {"P"} | set(st)
-            if set(st) & {"O", "E"}:
-                ran |= {"O", "E", "T"}
+            st = set(st)
+            ran = {"P"} | st
+            if st & {"B", "E"}:
+                ran |= {"B", "O", "E", "T"}  # the executor runs to the end
+            elif "O" in st:
+                ran |= {"B", "O"}  # stops after optimize when the tree is pristine
+            if ran & {"B", "O", "E"}:
                 need.update(self.q[i]["tables"])
             total += sum(sc.get(x, 0.0) for x in ran)
         return total + sum(self.table_cpu.get(t, 0.05) for t in need)
@@ -235,9 +239,9 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
         whole = set(range(body_lo, span_hi + 1))
 
         def reach(ls):
-            m4 = [0, 0, 0, 0]
+            m4 = [0] * 5
             for ln in ls:
-                for si, v in enumerate(cov.get(ln, (0, 0, 0, 0))):
+                for si, v in enumerate(cov.get(ln, (0,) * 5)):
                     m4[si] |= v
             return m4
 

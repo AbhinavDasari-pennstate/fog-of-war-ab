@@ -29,12 +29,16 @@ def main():
             if r.returncode:
                 print(cid, "NOAPPLY", r.stdout[-200:], flush=True)
                 continue
-            t = subprocess.run(
-                [py, "-m", "pytest", "tests/test_executor.py", "-k", "test_execute_tpcds", "-x", "-q",
-                 "-p", "no:cacheprovider", "-o", "addopts=", "--no-header"],
-                cwd=dst, capture_output=True, text=True, env=dict(os.environ, PYTHON_CPU_COUNT="2"),
-            )
-            print(cid, "PASS" if t.returncode == 0 else "FAIL", t.stdout.strip().splitlines()[-1:], flush=True)
+            res = []
+            for seed in os.environ.get("REAL_SEEDS", "0,1,2").split(","):  # the real test under several hash seeds
+                t = subprocess.run(
+                    [py, "-m", "pytest", "tests/test_executor.py", "-k", "test_execute_tpcds", "-x", "-q",
+                     "-p", "no:cacheprovider", "-o", "addopts=", "--no-header"],
+                    cwd=dst, capture_output=True, text=True,
+                    env=dict(os.environ, PYTHON_CPU_COUNT="2", PYTHONHASHSEED=seed),
+                )
+                res.append("P" if t.returncode == 0 else "F")
+            print(cid, "PASS" if set(res) == {"P"} else "FAIL", "seeds " + os.environ.get("REAL_SEEDS", "0,1,2"), "".join(res), flush=True)
             subprocess.run(["patch", "-R", "-p1", "-s", "--no-backup-if-mismatch", "-i", patch], cwd=dst, check=True)
 
 

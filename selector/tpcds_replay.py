@@ -117,7 +117,7 @@ def main():
                 raise RuntimeError("query meta differs from the map")
         need = set()
         for q, st in plan.items():
-            if "O" in st or "E" in st:
+            if set(st) & set("BOE"):
                 need.update(tp["queries"][str(q)]["tables"])
         tables = {t: core.load_table(src, t, schema[t]) for t in sorted(need)}
         order = sorted(plan, key=lambda q: tp["queries"][str(q)]["cpu"])

@@ -60,6 +60,18 @@ MUTANTS = {
         "    SAFE_DIVISION = False\n",
         False, "class-level constant of a dialect no TPC-DS query uses: the real test still passes",
     ),
+    "optimizer_noop": (
+        "sqlglot/optimizer/annotate_types.py",
+        "        if selects is None:\n",
+        "        if selects == None:\n",
+        False, "optimizer-only line that changes nothing: the real test passes, the replay runs O only",
+    ),
+    "seed_flaky": (
+        "sqlglot/optimizer/eliminate_subqueries.py",
+        "            if scope is cte_scope:\n",
+        "            if not scope is cte_scope:\n",
+        True, "optimizer-only line; query 53 fails under 7 of 10 PYTHONHASHSEEDs and passes under the others (synth-dev-1-0140)",
+    ),
     "state": (
         "sqlglot/executor/__init__.py",
         "    result = PythonExecutor(tables=tables_).execute(plan)\n",

@@ -121,8 +121,8 @@ def main():
     if a.mode == "alone":
         for i in order:
             gx = {}
-            for want in ((), ("T",)):  # the other stage sets the replay can run, each from the clean base
-                g = forked(lambda: core.run_query(qs[i][1], qs[i][0], schema, tables, want=want)["G"])
+            for want, so in (((), False), (("T",), False), (("O",), True)):  # the other stage sets the replay can run, each from the clean base
+                g = forked(lambda: core.run_query(qs[i][1], qs[i][0], schema, tables, want=want, stop_at_o=so)["G"])
                 if "error" in g:
                     raise SystemExit(f"variant {want} of query {i}: {g['error']}")
                 gx.update(g)

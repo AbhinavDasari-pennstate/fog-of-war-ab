@@ -48,7 +48,7 @@ def main():
     a = ap.parse_args()
     src = os.path.abspath(a.src)
     runs = RUNS[: a.only] if a.only else RUNS
-    STAGES = "POET"
+    STAGES = "PBOET"
     cov: dict[str, dict[int, list]] = {}
     base: dict[str, set] = {}
     seen: dict[int, dict[str, set]] = {}
@@ -94,7 +94,7 @@ def main():
                     for f, lines in files.items():
                         m = cov.setdefault(f, {})
                         for ln in lines:
-                            m.setdefault(ln, [0, 0, 0, 0])[si] |= 1 << i
+                            m.setdefault(ln, [0] * 5)[si] |= 1 << i
     if errors:
         print("ERRORS", errors[:5], file=sys.stderr)
         sys.exit(1)

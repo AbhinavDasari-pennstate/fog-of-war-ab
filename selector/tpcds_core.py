@@ -250,21 +250,27 @@ class Stop(Exception):
     pass
 
 
-STAGES = ("P", "O", "E", "T")  # parse + pickle, find_tables + optimize, plan + executor, transpile
+STAGES = ("P", "B", "O", "E", "T")
+# P parse + pickle round trip; B find_tables, ensure_tables, the schema build: everything execute() does
+# before it calls optimize(); O the optimize() call; E plan + executor + result pickle; T transpile.
+# B and E feed the executor without passing through the optimized tree, so a changed line in either
+# means the executor must run. Only a change confined to O can be judged by the optimized tree.
 
 
-def run_query(sql, meta, schema, tables, want=("O", "E", "T"), hook=None, expected=None):
-    """One query through the pipeline. Stage P (parse, pickle round trip) always runs.
-    `want` names the stages that execute a changed line (the recorder asks for all of them).
-      O or E wanted, or (with `expected`) the P digest differs from the pristine one: the executor
-        runs to the end. Nothing stops at the optimizer: find_tables, ensure_tables and the schema
-        build feed the executor outside the optimized tree, so only the executor's result can show
-        what they changed;
-      T (transpile, which only reads the SQL string) runs when wanted;
+def run_query(sql, meta, schema, tables, want=("B", "O", "E", "T"), hook=None, expected=None, stop_at_o=False):
+    """One query through the pipeline. Stage P always runs. `want` names the stages that execute a
+    changed line (the recorder asks for all of them).
+      B or E wanted, or (with `expected`) a P digest that differs from the pristine one: the executor
+        runs to the end and its result decides;
+      only O wanted: optimize() runs; if its output tree digest is the pristine one the run stops
+        there (the executor's inputs are then identical: B and E run no changed line); otherwise the
+        executor runs to the end;
+      T (transpile, which only reads the SQL string) runs when wanted, and always after an executor run;
       otherwise only P ran, and its digest decides.
+    `stop_at_o` (the recorder) stops after optimize whatever the digest.
     Returns {stage: digest} for the stages that ran, "ok" (the shared tables and schema came out as
-    they went in), "tables" (what find_tables gave). `hook(stage)` is called when a stage ends.
-    Raises on any error."""
+    they went in), "tables" (what find_tables gave), "G" (global fingerprint keyed by stages run).
+    `hook(stage)` is called when a stage ends. Raises on any error."""
     import sqlglot.executor as ex
     from sqlglot import find_tables, parse_one, transpile
 
@@ -286,29 +292,39 @@ def run_query(sql, meta, schema, tables, want=("O", "E", "T"), hook=None, expect
     used = []
     before = {}
     runs = bool(meta.get("execute"))
-    if runs and (want & {"O", "E"} or p_diff):
-        want.add("T")  # the state fingerprint is comparable only for the whole pipeline
+    full = runs and (bool(want & {"B", "E"}) or p_diff) and not stop_at_o
+    if runs and (full or "O" in want or stop_at_o):
         used = sorted({t.name for t in find_tables(expression)})
         before = {n: _rows_hash(tables[n]) for n in used}
         orig = ex.optimize
+        state = {"stopped": False}
 
         def optimize(*a, **k):
+            end("B")
             res = orig(*a, **k)
             out["O"] = digest(res)
             end("O")
+            if not full and (stop_at_o or (expected is not None and out["O"] in expected["O"])):
+                state["stopped"] = True
+                raise Stop()
             return res
 
         ex.optimize = optimize
+        result = None
         try:
             result = ex.execute(expression, schema=schema, tables={n: tables[n] for n in used})
+        except Stop:
+            pass
         finally:
             ex.optimize = orig
-        if "O" not in out:
-            raise RuntimeError("optimize was not called")
-        result = pickle.loads(pickle.dumps(result))  # back to the parent
-        out["E"] = digest((list(result.columns), [tuple(r) for r in result.rows]))
-        end("E")
-    if runs and "T" in want:
+        if not state["stopped"]:
+            if "O" not in out:
+                raise RuntimeError("optimize was not called")
+            result = pickle.loads(pickle.dumps(result))  # back to the parent
+            out["E"] = digest((list(result.columns), [tuple(r) for r in result.rows]))
+            end("E")
+            want.add("T")  # the state fingerprint is comparable only for the whole pipeline
+    if runs and "T" in want and not stop_at_o:
         out["T"] = sha(transpile(sql, write="duckdb")[0])
         end("T")
     out["G"] = {"".join(st for st in "PEOT" if st in out): state_fp()}

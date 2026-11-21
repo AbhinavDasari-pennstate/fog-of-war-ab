@@ -104,3 +104,48 @@ def test_class_constant_edit_replays_every_query_and_passes_when_harmless(tmp_pa
 def test_class_table_edit_that_breaks_queries_is_caught_by_the_replay(tmp_path):
     n, same, why = _replay_verdict("classlevel", tmp_path)
     assert n == 99 and not same, why
+
+
+def test_optimizer_only_noop_edit_replays_stage_o_only_and_passes(tmp_path):
+    """A2: a change reached only inside optimize() runs the optimizer, finds the tree pristine and skips the executor."""
+    import diffparse
+    import tpcds_scope
+
+    tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
+    changes = diffparse.parse(M.patch_text(str(PIN), "optimizer_noop"))
+    sc = tpcds_scope.scope([(c, True) for c in changes], tp, PIN)
+    assert sc.kind == "replay" and sc.plan and set(sc.plan.values()) == {"O"}, sc.plan
+    n, same, why = _replay_verdict("optimizer_noop", tmp_path)
+    assert same, why
+
+
+def test_executor_only_edit_plan_has_stage_e(tmp_path):
+    """A change in an executor-only line must plan stage E (the executor runs to the end)."""
+    import diffparse
+    import tpcds_scope
+
+    tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
+    for name, stage in (("executor", "E"), ("ensure_tables", "B"), ("find_tables", "B")):
+        changes = diffparse.parse(M.patch_text(str(PIN), name))
+        sc = tpcds_scope.scope([(c, True) for c in changes], tp, PIN)
+        assert sc.kind == "replay" and sc.plan, name
+        assert all(stage in v for v in sc.plan.values()), (name, set(sc.plan.values()))
+
+
+def test_seed_flaky_mutant_is_caught_by_the_seed_set_and_kept(tmp_path, capsys):
+    """synth-dev-1-0140: passes under seed 2 (its own crc seed) and fails under most others. The replay seed set
+    must include seeds that fail, and the selector keeps the giant."""
+    import diffparse
+    import tpcds_scope
+
+    tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
+    changes = diffparse.parse(M.patch_text(str(PIN), "seed_flaky"))
+    sc = tpcds_scope.scope([(c, True) for c in changes], tp, PIN)
+    assert sc.kind == "replay" and sc.plan
+    patched = {}
+    for c in changes:
+        patched[c.path_new] = diffparse.apply((PIN / c.path_new).read_bytes().decode("utf-8"), c)
+    verdicts = {sd: sel._run_replay(sc.plan, patched, PIN, 120, sd)[0] for sd in sel.replay_seeds(2)}
+    assert not all(verdicts.values()), verdicts
+    got = _run(tmp_path, {"flaky": M.patch_text(str(PIN), "seed_flaky")}, capsys)
+    assert got["flaky"] is True
