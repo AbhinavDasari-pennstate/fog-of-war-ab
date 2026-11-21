@@ -290,7 +290,7 @@ def _load_tpcds():
 def main(data: Path = DATA, src_root: Path = SRC) -> None:
     import gc
 
-    gc.disable()  # a short batch process: the trees it builds hold no cycles, and collection passes over them cost CPU
+    gc.disable()  # a short batch process: parsed trees free themselves by reference count and collection passes over them cost CPU
     tests = json.loads((data / "tests.json").read_text(encoding="utf-8"))["tests"]
     maps = _load_maps(tests)
     tp = _load_tpcds() if maps is not None and os.environ.get("BR_NO_REPLAY") != "1" else None
