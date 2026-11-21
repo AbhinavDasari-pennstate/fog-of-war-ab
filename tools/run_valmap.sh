@@ -11,10 +11,11 @@ PY=${PY:-$HERE/.venv/bin/python}
 BIN=$(dirname "$PY")
 SEED=${SEED:-0}
 mkdir -p "$OUT"
+"$PY" "$HERE/tools/vm_names.py" "$SRC" > "$OUT/setnames.json"
 cd "$SRC"
 ARGS=("$@")
 if [ ${#ARGS[@]} -eq 0 ]; then ARGS=(tests); fi
-SKIP_INTEGRATION=0 VM_OUT="$OUT" VM_SRC="$SRC" PATH="$BIN:$PATH" \
+SKIP_INTEGRATION=0 VM_OUT="$OUT" VM_SRC="$SRC" VM_SETNAMES="$OUT/setnames.json" PATH="$BIN:$PATH" \
   PYTHONPATH="$HERE/tools/valmap_site:$SRC:$HERE" PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=$SEED \
   "$PY" -m pytest -n "$NW" -p no:cacheprovider -o addopts="" --assert=plain --timeout 900 \
   --junitxml="$OUT/junit.xml" -p tools.vmfork -p tools.preimport "${ARGS[@]}" > "$OUT/pytest.log" 2>&1

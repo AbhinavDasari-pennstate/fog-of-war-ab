@@ -67,6 +67,32 @@ def site_nodes(tree):
     return out
 
 
+def set_eligible(v) -> bool:
+    """A set display of at least one string constant, no repeats."""
+    if not isinstance(v, ast.Set) or not v.elts:
+        return False
+    if not all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in v.elts):
+        return False
+    return len({e.value for e in v.elts}) == len(v.elts)
+
+
+def set_nodes(tree):
+    """[(statement, class qualname, name)] for every module- or class-level `NAME = {"a", "b"}` of string constants."""
+    out = []
+
+    def visit(body, stack):
+        for s in body:
+            if isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name) and set_eligible(s.value):
+                out.append((s, ".".join(stack), s.targets[0].id))
+            elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name) and s.value is not None and set_eligible(s.value):
+                out.append((s, ".".join(stack), s.target.id))
+            elif isinstance(s, ast.ClassDef):
+                visit(s.body, stack + [s.name])
+
+    visit(tree.body, [])
+    return out
+
+
 def literal_tree(n) -> bool:
     """A constant, a tuple or list of literal trees, or a sign on a number constant."""
     if isinstance(n, ast.Constant):
@@ -124,6 +150,34 @@ def entries(old_tree, new_tree, diffs):
     return res
 
 
+def set_entries(old_tree, new_tree, diffs):
+    """[(statement line, [repr of every word the edit removes or adds])] when the patch only changes string constants that
+    are elements of eligible set displays (same size, so no word is added or dropped other than by the rename), else None."""
+    if not diffs or not all(isinstance(n, ast.Constant) and d is None for n, d in diffs):
+        return None
+    olds, news = set_nodes(old_tree), set_nodes(new_tree)
+    if len(olds) != len(news):
+        return None
+    where = {}
+    for (stmt, _, _), (nstmt, _, _) in zip(olds, news):
+        if len(stmt.value.elts) != len(nstmt.value.elts):
+            return None
+        for e, ne in zip(stmt.value.elts, nstmt.value.elts):
+            where[id(e)] = (stmt.lineno, e, ne)
+    out = {}
+    for n, _ in diffs:
+        w = where.get(id(n))
+        if w is None:
+            return None
+        ln, e, ne = w
+        words = out.setdefault(ln, [])
+        for x in (e.value, ne.value):
+            r = repr(x)
+            if r not in words:
+                words.append(r)
+    return sorted(out.items())
+
+
 class Val:
     def __init__(self, maps_dir: str):
         self.ok = False
@@ -148,6 +202,23 @@ class Val:
             self.ok = True
         except Exception:
             self.ok = False
+
+    def set_readers(self, path: str, line: int, words):
+        """Mask of the tests that looked up one of `words` in the set statement at path:line, or read the set as a whole
+        (plus unrecorded tests); None when the set is unknown or was read as a whole while a module or class body ran."""
+        if not self.ok:
+            return None
+        site = f"{path}:{line}"
+        if site not in self.sites:
+            return None
+        der = self.derived.get(site, ())
+        if "*" in der or any(w in der for w in words):
+            return None
+        r = self.reads.get(site, {})
+        mask = self.sets[r.get("*", 0)] | self.unrecorded
+        for w in words:
+            mask |= self.sets[r.get(w, 0)]
+        return mask
 
     def readers(self, path: str, line: int, key: str, truth_changed: bool = False):
         """Mask of the tests that read the value of `key` in the dict statement at path:line (plus every unrecorded

@@ -755,6 +755,14 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
                     for x in masks:
                         got |= x
                     return got | sr, f"V {path}: constants in {len(ents)} dict entr{'y' if len(ents) == 1 else 'ies'} read by recorded tests"
+            sents = valrule.set_entries(old_tree, new_tree, diffs)
+            if sents:
+                masks = [ctx.val().set_readers(path, ln, words) for ln, words in sents]
+                if all(x is not None for x in masks):
+                    got = 0
+                    for x in masks:
+                        got |= x
+                    return got | sr, f"V {path}: string constants in {len(sents)} set(s) looked up by recorded tests"
         except Exception:
             pass
     ctx.narrow = None

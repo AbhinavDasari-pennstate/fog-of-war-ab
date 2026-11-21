@@ -303,3 +303,95 @@ def test_two_spellings_of_one_key_make_the_site_unusable(monkeypatch):
     A = object()
     rt._vw({A: 1}, "m.py:3", (A, A), ("@x.A", "@x.B"), False)
     assert ("B", "m.py:3", "") in log
+
+
+# ---- string sets ---------------------------------------------------------------------------------------------
+
+SET_OLD = '''
+A = {"x", "y"}
+
+class G:
+    RESERVED = {"varchar", "select", "from"}
+    OTHER = {1, 2}
+    DUP = {"a", "a"}
+'''
+
+
+def set_run(old, new):
+    ot, nt = ast.parse(old), ast.parse(new)
+    diffs = pyscope.ast_diff(ot, nt, [(i + 1, i + 1) for i in range(len(old.splitlines()))])
+    return valrule.set_entries(ot, nt, diffs)
+
+
+def test_set_word_rename_names_both_words():
+    assert set_run(SET_OLD, SET_OLD.replace('"varchar"', '"zarchar"')) == [(5, ["'varchar'", "'zarchar'"])]
+    assert set_run(SET_OLD, SET_OLD.replace('"x"', '"w"')) == [(2, ["'x'", "'w'"])]
+
+
+def test_set_edit_outside_eligible_sets_does_not_qualify():
+    assert set_run(SET_OLD, SET_OLD.replace("{1, 2}", "{1, 3}")) is None
+    assert set_run(SET_OLD, SET_OLD.replace('"a", "a"', '"a", "b"')) is None
+
+
+def test_set_sites():
+    assert [(s.lineno, q, n) for s, q, n in valrule.set_nodes(ast.parse(SET_OLD))] == [(2, "", "A"), (5, "G", "RESERVED")]
+
+
+def test_set_readers(tmp_path):
+    v = make_val(tmp_path, sites=["m.py:5", "m.py:2"], reads={"m.py:5": {"'varchar'": 1, "*": 3}}, derived={"m.py:2": ["'x'"]})
+    assert v.set_readers("m.py", 5, ["'varchar'", "'zarchar'"]) == 0b10110 | (1 << 7)
+    assert v.set_readers("m.py", 5, ["'select'"]) == 0b10000 | (1 << 7)
+    assert v.set_readers("m.py", 2, ["'x'", "'w'"]) is None  # a derived word
+    assert v.set_readers("m.py", 9, ["'x'"]) is None  # unknown set
+
+
+@pytest.fixture
+def setrec(monkeypatch):
+    import vm_runtime as rt
+
+    log = []
+    monkeypatch.setattr(rt, "_emit", lambda tag, site, key: log.append((tag, site, key)))
+    monkeypatch.setattr(rt, "KEY", "tests/t.py::T::t1")
+    monkeypatch.setattr(rt, "IMPORTING", 0)
+    rt._SEEN.clear()
+    s = rt._sw({"aa", "bb"}, "m.py:1")
+    log.clear()
+    return rt, s, log
+
+
+def test_membership_records_the_word_and_nothing_else(setrec):
+    rt, s, log = setrec
+    assert rt._mem("aa", s) is True and rt._mem("zz", s) is False
+    assert type(s) is set
+    assert [(k) for t, site, k in log] == ["'aa'", "'zz'"]
+
+
+def test_every_other_load_is_a_whole_read(setrec):
+    rt, s, log = setrec
+    rt._bulk(s)
+    assert log[-1][2] == "*"
+    log.clear()
+    rt._SEEN.clear()
+    class C:
+        pass
+    C.N = s
+    rt._gets(C, "N")
+    assert log[-1][2] == "*"
+    log.clear()
+    rt._SEEN.clear()
+    rt._sd(C).get("N")
+    assert log[-1][2] == "*"
+    log.clear()
+    rt._SEEN.clear()
+    list(rt._sv(C).items())
+    assert log[-1][2] == "*"
+
+
+def test_transform_rewrites_loads_and_membership():
+    import vm_transform as vt
+
+    src = "def f(self, x):\n    a = x in self.S\n    b = x not in S\n    c = self.S | y\n    d = getattr(self, 'S')\n    e = vars(self)\n    g = self.__dict__\n"
+    tree = vt.rewrite_set_loads(ast.parse(src), {"S"})
+    out = ast.unparse(tree)
+    assert "_mem(x, self.S)" in out and "not _mem(x, S)" in out and "_bulk(self.S) | y" in out
+    assert "_gets(self" in out and "_sv(self)" in out and "_sd(self)" in out

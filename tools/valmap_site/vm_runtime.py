@@ -218,3 +218,161 @@ def _vw(d, site, keys=None, labels=None, spread=False):
         if len(r._lb) != len(labels) or (not spread and len(d) != len(labels)):  # two spellings of one key, or a key collapsed: unusable
             _emit("B", site, "")
     return r
+
+
+# ---- string sets (class- or module-level `NAME = {"a", "b"}`) --------------------------------------------------------
+# A set is NOT wrapped in a subclass: CPython reads a set's storage directly in set(s), x.update(s), a & s, a + l ... without
+# calling any override, so a subclass could not see those reads. The set stays an exact `set`. Instead the SOURCE is
+# rewritten (vm_transform): `x in NAME` / `x not in NAME` becomes `_mem(x, NAME)`, which records the looked-up word, and EVERY
+# other load of a name from SETNAMES (any `.NAME`, bare `NAME`, getattr, vars, __dict__) becomes a whole-set read (`_bulk`,
+# `_gets`, `_sv`). The id of each set is registered when its display runs (`_sw`). Words are logged like dict keys (repr).
+
+SETREG = {}
+_SHIM = {}
+
+
+class _Shim:
+    __slots__ = ("_vs", "_lb")
+
+
+def _shim(site):
+    sh = _SHIM.get(site)
+    if sh is None:
+        sh = _SHIM[site] = _Shim()
+        sh._vs = site
+        sh._lb = None
+    return sh
+
+
+def _sw(s, site):
+    SETREG[id(s)] = (site, s)
+    if site not in _CREATED:
+        _CREATED.add(site)
+        _emit("S", site, "")
+    return s
+
+
+def _reg(v):
+    ent = SETREG.get(id(v))
+    return ent[0] if ent is not None and ent[1] is v else None
+
+
+def _mem(x, s):
+    site = _reg(s)
+    if site is not None and isinstance(x, str):
+        _note(_shim(site), x)
+    return x in s
+
+
+def _bulk(s):
+    site = _reg(s)
+    if site is not None:
+        _note(_shim(site), "*")
+    return s
+
+
+def _gets(o, n, *d):
+    v = getattr(o, n, *d)
+    site = _reg(v)
+    if site is not None:
+        _note(_shim(site), "*")
+    return v
+
+
+class _SV:
+    """`o.__dict__` / vars(o): reading a value that is a registered set is a whole-set read."""
+
+    __slots__ = ("_d",)
+
+    def __init__(self, d):
+        object.__setattr__(self, "_d", d)
+
+    def _all(self):
+        for v in list(self._d.values()):
+            site = _reg(v)
+            if site is not None:
+                _note(_shim(site), "*")
+
+    def _one(self, k):
+        v = self._d.get(k) if not isinstance(k, (dict, list, set)) else None
+        site = _reg(v)
+        if site is not None:
+            _note(_shim(site), "*")
+
+    def __getitem__(self, k):
+        self._one(k)
+        return self._d[k]
+
+    def get(self, k, *d):
+        self._one(k)
+        return self._d.get(k, *d)
+
+    def pop(self, k, *d):
+        self._one(k)
+        return self._d.pop(k, *d)
+
+    def setdefault(self, k, *d):
+        self._one(k)
+        return self._d.setdefault(k, *d)
+
+    def __iter__(self):
+        return iter(self._d)
+
+    def __len__(self):
+        return len(self._d)
+
+    def __contains__(self, k):
+        return k in self._d
+
+    def __setitem__(self, k, v):
+        self._d[k] = v
+
+    def __delitem__(self, k):
+        del self._d[k]
+
+    def keys(self):
+        return self._d.keys()
+
+    def values(self):
+        self._all()
+        return self._d.values()
+
+    def items(self):
+        self._all()
+        return self._d.items()
+
+    def copy(self):
+        self._all()
+        return self._d.copy()
+
+    def __eq__(self, o):
+        self._all()
+        return self._d == o
+
+    def __or__(self, o):
+        self._all()
+        return self._d | o
+
+    def __ror__(self, o):
+        self._all()
+        return o | self._d
+
+    def __repr__(self):
+        self._all()
+        return repr(self._d)
+
+    def __getattr__(self, n):
+        self._all()
+        return getattr(self._d, n)
+
+
+def _sd(o):
+    d = o.__dict__
+    return _SV(d) if hasattr(d, "values") else d
+
+
+def _sv(o=None, *rest):
+    if rest or o is None:
+        return vars(o, *rest)
+    d = vars(o)
+    return _SV(d) if hasattr(d, "values") else d
