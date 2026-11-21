@@ -124,3 +124,54 @@ def ast_diff(old, new, ranges):
 
     walk(old, new, None, old)
     return out
+
+
+# ---- scope hazards: an edit that changes how a whole function resolves names ----------------------
+
+_GEN_FLAGS = 0x20 | 0x80 | 0x200 | 0x100  # generator, coroutine, async generator, iterable coroutine
+
+
+def _code_scopes(text: str, path: str):
+    """key -> (locals, names, frees, flags, first line, last line) for every code object of the module."""
+    import types
+
+    out = {}
+
+    def walk(co, prefix):
+        seen: dict = {}
+        for c in co.co_consts:
+            if isinstance(c, types.CodeType):
+                n = seen.get(c.co_name, 0)
+                seen[c.co_name] = n + 1
+                key = f"{prefix}/{c.co_name}#{n}"
+                lines = [ln for _, _, ln in c.co_lines() if ln is not None]
+                out[key] = (
+                    frozenset(c.co_varnames) | frozenset(c.co_cellvars), frozenset(c.co_names), frozenset(c.co_freevars),
+                    c.co_flags & _GEN_FLAGS, min(lines + [c.co_firstlineno]), max(lines + [c.co_firstlineno]),
+                )
+                walk(c, key)
+
+    walk(compile(text, path, "exec", dont_inherit=True), "")
+    return out
+
+
+def scope_hazards(old_text: str, new_text: str, path: str = "<src>") -> list:
+    """Old-file line ranges of every function scope that the edit changes as a whole.
+
+    An edit to one statement can break every call of its function without that statement running: it can make the
+    function a generator or coroutine, change which of its names are local (a name that was read from the module now
+    binds in the function, or the reverse), or change what it takes from an enclosing scope. Returns [] when the
+    scope tables match; raises when either text does not compile (the caller already widens then)."""
+    a = _code_scopes(old_text, path)
+    b = _code_scopes(new_text, path)
+    out = []
+    for key, (loc_a, nam_a, fre_a, fl_a, s, e) in a.items():
+        rec = b.get(key)
+        if rec is None:
+            continue  # the scope itself was added or removed: the statement rules see that
+        loc_b, nam_b, fre_b, fl_b, _, _ = rec
+        added, removed = loc_b - loc_a, loc_a - loc_b
+        bad = fl_a != fl_b or fre_a != fre_b or bool(added & (nam_a | fre_a)) or bool(removed & (nam_b | fre_b))
+        if bad:
+            out.append((s, e))
+    return out

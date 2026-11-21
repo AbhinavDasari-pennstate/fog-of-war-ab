@@ -362,7 +362,18 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
 
     is_test = path.startswith("tests/") and os.path.basename(path).startswith("test_")
     out = _py_lines(ctx, path, change, old_text.split("\n"), is_test, soft) | sr
-    return out, f"R6/R7 {path}"
+    # R8: a one-statement edit that changes the function's local names, generator-ness or closure breaks every
+    # call of the function, whether or not the edited statement runs
+    note = ""
+    try:
+        haz = pyscope.scope_hazards(old_text, new_text, path)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return out | ctx.wide(path), f"R3 {path}: scope table"
+    for lo, hi in haz:
+        out |= ctx.udef(path, lo, hi)
+    if haz:
+        note = f"; R8 scope change in {len(haz)} function(s)"
+    return out, f"R6/R7 {path}{note}"
 
 
 def _weak(ctx: Ctx, changes) -> int:

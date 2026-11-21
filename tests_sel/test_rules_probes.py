@@ -163,3 +163,39 @@ def test_decorator_on_init_subclass_selects_every_importer_of_expressions(env):
     assert new != old
     got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
     assert len(got) >= 1600
+
+
+TPCDS = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+
+
+def test_m3_uncovered_statement_that_makes_a_global_name_local_selects_every_caller(env):
+    """Reviewer M3: `rows = [...]` became `Table = [...]` in a branch few tests run. Table becomes a local of
+    the whole function, so every call raises UnboundLocalError (test_execute_tpcds really fails)."""
+    maps, tests, diffparse, rules = env
+    patch = (Path(__file__).resolve().parent / "fixtures" / "unbound_local.patch").read_text()
+    got, why = rules.select(diffparse.parse(patch), maps, tests, src_root=PIN)
+    ids = {t["id"]: t["number"] for t in tests}
+    assert ids[TPCDS] in got, why
+
+
+def test_m3_variant_yield_in_a_rarely_run_statement_selects_every_caller(env):
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/executor/table.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace("            rows = [tuple(row[name] for name in column_names) for row in table]",
+                      "            yield [tuple(row[name] for name in column_names) for row in table]", 1)
+    assert new != old
+    got, why = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    ids = {t["id"]: t["number"] for t in tests}
+    assert ids[TPCDS] in got, why
+
+
+def test_scope_hazards_unit():
+    import pyscope
+
+    base = "G = 1\ndef f(x):\n    if x:\n        rows = 1\n    return rows if x else G\n"
+    assert pyscope.scope_hazards(base, base.replace("rows = 1", "rows = 2")) == []
+    assert pyscope.scope_hazards(base, base.replace("rows = 1", "G = 1")) != []  # G becomes local
+    assert pyscope.scope_hazards(base, base.replace("rows = 1", "yield 1")) != []  # generator
+    assert pyscope.scope_hazards(base, base.replace("rows = 1", "tmp = 1")) != []  # rows no longer bound: global lookup
+    assert pyscope.scope_hazards(base, base.replace("rows = 1", "rows = 1\n        extra = 2")) == []  # brand-new name
