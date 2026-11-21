@@ -41,3 +41,9 @@ presubmit:
 .PHONY: maps
 maps:
 	$(PY) tools/build_maps.py build --src $(SRC) --run $(RUN) --tests $(SAMPLE)/tests.json --flaky $(FLAKY) --out maps --python $(PY)
+
+# Laptop only. Value-read map (maps/valreads.bin): run tools/run_valmap.sh once per hash seed (SEED=0, 1, 2) into
+# VMRUN dirs, then build. SRC = sqlglot checkout at the pinned SHA.
+.PHONY: valmap
+valmap:
+	$(PY) tools/build_valmap.py build --maps maps --run $(VMRUN) --out maps/valreads.bin

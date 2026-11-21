@@ -16,6 +16,7 @@ from pathlib import Path
 import diffparse
 import attrrule
 import pyscope
+import valrule
 import weakmut
 
 DEFAULT_SRC = os.environ.get("BR_SRC", "/app/sqlglot-src")
@@ -52,11 +53,17 @@ class Ctx:
         self.single = False  # the patch changes one file
         self.narrow = None  # (start line, mask) of a class-level assignment narrowed by maps/attrreads.bin
         self._attr = None
+        self._val = None
 
     def attr(self):
         if self._attr is None:
             self._attr = attrrule.Attr(self.m.dir)
         return self._attr
+
+    def val(self):
+        if self._val is None:
+            self._val = valrule.Val(self.m.dir)
+        return self._val
 
     def note(self, s: str):
         self.notes.append(s)
@@ -421,6 +428,18 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
     got = _defaults_only(ctx, path, diffs, old_tree, new_tree, ranges)
     if got is not None:
         return got | sr, f"R6/R7 {path}: literal default values only"
+    if path.startswith("sqlglot/"):
+        try:
+            ents = valrule.entries(old_tree, new_tree, diffs)
+            if ents:
+                masks = [ctx.val().readers(path, ln, key, tc) for ln, key, tc in ents]
+                if all(x is not None for x in masks):
+                    got = 0
+                    for x in masks:
+                        got |= x
+                    return got | sr, f"V {path}: constants in {len(ents)} dict entr{'y' if len(ents) == 1 else 'ies'} read by recorded tests"
+        except Exception:
+            pass
     ctx.narrow = None
     if ctx.single and path.startswith("sqlglot/"):
         try:
