@@ -58,21 +58,37 @@ class TpcdsMap:
         self.q = {int(k): v for k, v in raw["queries"].items()}
         self.unstable = set(raw["unstable"])
 
+    table_cpu: dict = {}
+
     @classmethod
     def load(cls, path) -> "TpcdsMap":
+        import os
+
         with open(path, "rb") as f:
-            return cls(json.loads(zlib.decompress(f.read())))
+            m = cls(json.loads(zlib.decompress(f.read())))
+        try:
+            with open(os.path.join(os.path.dirname(path), "tpcds_tables.json")) as f:
+                m.table_cpu = json.load(f)
+        except OSError:
+            pass
+        return m
+
+    FIXED_S = 0.30  # interpreter, map, import of every module, fixture parse, one fork
 
     def cost(self, plan: dict) -> float:
-        """Seconds the replay takes (build-machine measurement): the stages each query has to run.
-        Stage P always runs; O or E means the executor runs to the end (O, E); T is independent."""
-        total = 0.0
+        """Native CPU seconds the replay takes (build-machine measurements, calibrated against real
+        replays within a few percent): the stages each query runs (P always; O or E means O, E and T
+        run; T alone is independent) plus loading the tables those queries read plus the fixed start."""
+        total = self.FIXED_S
+        need = set()
         for i, st in plan.items():
             sc = self.q[i]["stage_cpu"]
-            need = {"P"} | set(st) | ({"O", "E"} if set(st) & {"O", "E"} else set())
-            total += sum(sc.get(x, 0.0) for x in need)
-        return total
-
+            ran = {"P"} | set(st)
+            if set(st) & {"O", "E"}:
+                ran |= {"O", "E", "T"}
+                need.update(self.q[i]["tables"])
+            total += sum(sc.get(x, 0.0) for x in ran)
+        return total + sum(self.table_cpu.get(t, 0.05) for t in need)
 
 def _units(tree):
     """Outermost function defs, in source order, keyed (qualified name, ordinal)."""

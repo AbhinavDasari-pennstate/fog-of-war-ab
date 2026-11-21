@@ -127,10 +127,12 @@ REPLAY_EST_BUDGET_S = float(os.environ.get("BR_REPLAY_EST", "150"))
 REPLAY_EMERGENCY_WALL_S = float(os.environ.get("BR_REPLAY_WALL", "140"))
 REPLAY_PER_COMMIT_S = float(os.environ.get("BR_REPLAY_COMMIT", "40"))
 # The replay must cost clearly less than the giant it replaces (build-machine seconds x slack).
+# The board charges CPU at about BOARD_K times the native seconds measured here (v2: 0.6 s native, 1.10 on the board).
+BOARD_K = float(os.environ.get("BR_K", "2.5"))
 # A replay is run only when its estimated CPU is below this share of the simulated seconds the drop
-# saves (a replay that finds a failure costs less than its estimate, one that passes costs about it).
+# saves (est is native CPU; the board multiplies it by BOARD_K).
 REPLAY_WORTH = 0.8
-REPLAY_SLACK = 1.15
+REPLAY_SLACK = 1.05  # est is calibrated; this covers the spread
 REPLAY_OVERHEAD_S = 1.0
 
 
@@ -222,7 +224,7 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
                     num, sc, patched = cand
                     print(f"  tpcds: {sc.kind} {sc.why[:200]}", file=sys.stderr)
                     if sc.kind == "replay":
-                        est = tp.cost(sc.plan) * REPLAY_SLACK + (REPLAY_OVERHEAD_S if sc.plan else 0.0)
+                        est = tp.cost(sc.plan) * REPLAY_SLACK if sc.plan else 0.0
                         pending.append((est, patch.stem, num, sc, patched, chosen))
             except Exception as exc:
                 print(f"  tpcds refine failed ({type(exc).__name__}: {exc}): giant stays", file=sys.stderr)
@@ -245,7 +247,7 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
     with ThreadPoolExecutor(max_workers=2) as pool:
         for est, commit, num, sc, patched, chosen in pending:
             gain = (_cost(_pack(chosen, tests), dur) - _cost(_pack(chosen - {num}, tests), dur)) / 1000.0
-            if est > gain * REPLAY_WORTH:
+            if BOARD_K * est > gain * REPLAY_WORTH:
                 print(f"{commit}: tpcds replay est {est:.1f}s vs giant {gain:.1f}s: giant stays", file=sys.stderr)
                 continue
             if not sc.plan:
