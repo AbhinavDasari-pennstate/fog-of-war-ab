@@ -59,8 +59,9 @@ def test_droppable_rules():
     assert W.droppable("C", 4, W.EVAL_BIT)  # evaluated, no alternative differed
     assert not W.droppable("C", 4, W.EVAL_BIT | bit)
     assert W.droppable("C", 5, W.EVAL_BIT | bit)  # a different alternative differed, not this one
-    assert not W.droppable("B", None, W.EVAL_BIT | W.ALT_BIT)
+    assert W.droppable("B", None, 0) and not W.droppable("B", None, W.EVAL_BIT)  # and/or: only a site that never ran
     assert W.droppable("N", None, 0) and not W.droppable("N", None, W.EVAL_BIT)
+    assert not W.droppable("C", 4, W.EVAL_BIT | W.UNKNOWN_BIT) and not W.droppable("C", 4, W.UNKNOWN_BIT)
 
 
 def test_drops_uses_the_summary_and_the_source_readers():
@@ -90,9 +91,9 @@ def rt(tmp_path, monkeypatch):
     importlib.reload(wm_runtime)
     import builtins
 
-    builtins._wm_c, builtins._wm_b, builtins._wm_n = wm_runtime.wm_c, wm_runtime.wm_b, wm_runtime.wm_n
+    builtins._wm_c, builtins._wm_m = wm_runtime.wm_c, wm_runtime.wm_m
     yield wm_runtime
-    for n in ("_wm_c", "_wm_b", "_wm_n"):
+    for n in ("_wm_c", "_wm_m"):
         delattr(builtins, n)
 
 
@@ -139,27 +140,33 @@ def test_raising_alternative_counts_as_different(rt):
     assert mask & (1 << 0)  # None < None raises TypeError
 
 
-def test_boolop_truth_context_and_short_circuit(rt):
-    ns = run_instrumented("def f(a, b):\n    if a and b:\n        return 1\n    return 0\n", rt)
-    assert ns["f"](1, 1) == 1
-    (mask,) = bits(rt, "B").values()
-    assert not mask & W.ALT_BIT  # both truthy: or agrees on truth value
-    assert ns["f"](1, 0) == 0
-    (mask,) = bits(rt, "B").values()
-    assert mask & W.ALT_BIT
-
-
-def test_boolop_unevaluable_operand_is_conservative(rt):
+def test_boolop_records_only_that_it_ran_and_does_so_before_its_operands(rt):
     ns = run_instrumented("def f(a, g):\n    if a and g():\n        return 1\n    return 0\n", rt)
-    assert ns["f"](0, lambda: 1) == 0  # `or` would call g(): not pure, so flagged
-    (mask,) = bits(rt, "B").values()
-    assert mask & W.ALT_BIT
+    assert not bits(rt, "B")
+    assert ns["f"](0, lambda: 1) == 0
+    assert list(bits(rt, "B").values()) == [W.EVAL_BIT]
+
+    def boom():
+        raise ValueError
+
+    ns = run_instrumented("def f(a, g):\n    return a < g()\n", rt)
+    rt.SEEN.clear()
+    with pytest.raises(ValueError):
+        ns["f"](1, boom)
+    assert any(m & W.EVAL_BIT for m in rt.SEEN.values())  # an operand that raises still counts as ran
+
+
+def test_hash_operands_set_every_bit(rt):
+    ns = run_instrumented("def f(a, b):\n    return hash(a) == hash(b)\n", rt)
+    ns["f"](1, 1)
+    (mask,) = bits(rt, "C").values()
+    assert mask & 0x3FF == 0x3FF
 
 
 def test_not_records_only_evaluation(rt):
     ns = run_instrumented("def f(a, b):\n    return a and not str(b)\n", rt)
     ns["f"](0, 1)
-    assert not bits(rt, "N")
+    assert not bits(rt, "N")  # `a` is falsy: the `not` operand never ran
     ns["f"](1, 1)
     assert list(bits(rt, "N").values()) == [W.EVAL_BIT]
 

@@ -22,9 +22,9 @@ def rt(tmp_path, monkeypatch):
     import wm_runtime
 
     importlib.reload(wm_runtime)
-    builtins._wm_c, builtins._wm_b, builtins._wm_n = wm_runtime.wm_c, wm_runtime.wm_b, wm_runtime.wm_n
+    builtins._wm_c, builtins._wm_m = wm_runtime.wm_c, wm_runtime.wm_m
     yield wm_runtime
-    for n in ("_wm_c", "_wm_b", "_wm_n"):
+    for n in ("_wm_c", "_wm_m"):
         delattr(builtins, n)
 
 
@@ -66,7 +66,11 @@ PROBES = [
     ("is_to_eq_none", "return a is None", "return a == None", [(None, 0), (1, 0), ([], 0)], True),
     ("is_to_isnot", "return a is None", "return a is not None", [(None, 0)], False),
     ("in_to_notin", "return a in (1, 2)", "return a not in (1, 2)", [(1, 0)], False),
-    ("and_to_or_both_true", "return 1 if a and b else 0", "return 1 if a or b else 0", [(1, 2), (3, 4)], True),
+    ("and_to_or_both_true_still_kept", "return 1 if a and b else 0", "return 1 if a or b else 0", [(1, 2), (3, 4)], False),
+    ("and_to_or_unreached", "return 1 if a else (a and b)", "return 1 if a else (a or b)", [(1, 2)], True),
+    ("nested_boolop_value_context", "return (a and 5) or b", "return (a or 5) or b", [(1, 2)], False),
+    ("skipped_side_effect_operand", "return not a and h(b)", "return not a or h(b)", [(1, 2)], False),
+    ("hash_compare", "return hash(a) == hash(b)", "return hash(a) >= hash(b)", [(1, 1)], False),
     ("and_to_or_differs", "return 1 if a and b else 0", "return 1 if a or b else 0", [(1, 0), (1, 2)], False),
     ("and_to_or_value_context", "return a and b", "return a or b", [(1, 2)], False),
     ("not_removed_unreached", "return b if a else (not b)", "return b if a else b", [(1, 5)], True),
@@ -76,8 +80,8 @@ PROBES = [
 
 @pytest.mark.parametrize("name,old_b,new_b,calls,expect", PROBES, ids=[p[0] for p in PROBES])
 def test_drop_decision_matches_real_run(rt, name, old_b, new_b, calls, expect):
-    old = f"def f(a, b):\n    {old_b}\n"
-    new = f"def f(a, b):\n    {new_b}\n"
+    old = f"def h(x):\n    return x\ndef f(a, b):\n    {old_b}\n"
+    new = f"def h(x):\n    return x\ndef f(a, b):\n    {new_b}\n"
     drop = decide(rt, old, new, calls)
     assert drop is expect
     if drop:  # the law: a dropped mutant behaves exactly like the original
@@ -112,3 +116,36 @@ def test_unrecognised_shapes_are_kept(rt, name, old, new):
                 key_all[(n.lineno, n.col_offset, n.end_lineno, n.end_col_offset, kind)] = W.EVAL_BIT
     got, _ = W.drops("m.py", None, old, new, {1: {"m.py": key_all}})
     assert got == set()
+
+
+# ---- the reviewer's three proven misses, on the committed profile and the pinned sqlglot -------------
+
+from conftest import PIN, ROOT, needs_pin  # noqa: E402
+
+REGRESSIONS = [
+    # (file, line, old text, new text, test number that really failed)
+    ("sqlglot/parser.py", 9203, '"CURRENT ROW")', None, 1440),
+    ("sqlglot/parser.py", 5072, "not schema and ", "not schema or ", 1295),
+    ("sqlglot/expressions/core.py", 838, "hash(self) == hash(other)", "hash(self) >= hash(other)", 1382),
+]
+
+
+@needs_pin
+@pytest.mark.parametrize("path,line,old,new,test", REGRESSIONS, ids=["value-context-and-or", "skipped-side-effect", "hash-order"])
+def test_proven_misses_are_kept(path, line, old, new, test):
+    sys.path.insert(0, str(ROOT))
+    from maps.load import load
+
+    maps = load(str(ROOT / "maps"))
+    if not maps.weakmut:
+        pytest.skip("maps/weakmut.bin not built")
+    text = (PIN / path).read_text("utf-8")
+    lines = text.split("\n")
+    if new is None:  # the and->or at parser.py:9203
+        assert " and " in lines[line - 1]
+        lines[line - 1] = lines[line - 1].replace(" and ", " or ", 1)
+    else:
+        assert old in lines[line - 1]
+        lines[line - 1] = lines[line - 1].replace(old, new, 1)
+    got, _ = W.drops(path, None, text, "\n".join(lines), maps.weakmut)
+    assert test not in got

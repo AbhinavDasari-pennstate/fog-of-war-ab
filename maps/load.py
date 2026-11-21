@@ -106,6 +106,7 @@ class Maps:
             try:
                 if os.path.exists(os.path.join(self.dir, "weakmut.bin")):
                     d = _read(self.dir, "weakmut.bin")
+                    self.weakmut_rec = d.get("rec")
                     for n, rec in d.get("tests", {}).items():
                         if n < len(self.ids) and self.ids[n] == rec["id"]:
                             w[n] = rec["sites"]

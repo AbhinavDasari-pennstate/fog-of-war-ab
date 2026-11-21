@@ -10,19 +10,22 @@ Anything else (other shapes, several edits, class or module level, unknown site)
 
 Sites (shared by the instrumenter and the selector, so both agree):
   C  Compare with exactly one operator       summary bit j = replacing the operator by OPS[j] differs or raises
-  B  BoolOp (and/or)                         bit 11 = swapping and/or differs (bool ctx: truth value, else identity)
+  B  BoolOp (and/or)                         only the evaluated bit: a swap skips or adds operands (side effects,
+                                             value context), so it is dropped only if the site never ran
   N  UnaryOp Not                             only the evaluated bit (removing `not` always differs)
-  bit 10 = the site was evaluated at least once in the recorded run
+  bit 10 = the site was reached at least once in the recorded runs (recorded BEFORE its operands run)
+  bit 12 = "unknown": the recorded runs disagreed or an operand came from hash()/id(): never dropped
 Only code that runs when a function or lambda body runs counts (not defaults, decorators, annotations
 of the def, class bodies, module level).
 """
 
 import ast
 
+RECORDER_VERSION = 2
 OPS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq, ast.Is, ast.IsNot, ast.In, ast.NotIn)
 EVAL_BIT = 1 << 10
 ALT_BIT = 1 << 11
-_FORBID = (ast.Yield, ast.YieldFrom, ast.Await, ast.NamedExpr)
+UNKNOWN_BIT = 1 << 12
 
 
 def op_index(op) -> int:
@@ -40,31 +43,13 @@ def key_tuple(node, kind: str):
     return (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset, kind)
 
 
-def _thunk_ok(node) -> bool:
+def tainted(node) -> bool:
+    """An operand may come from hash() or id(): its order alternatives depend on the process, never model them."""
     for n in ast.walk(node):
-        if isinstance(n, _FORBID):
-            return False
-        if isinstance(n, ast.Name) and n.id in ("super", "__class__"):
-            return False
-    return True
-
-
-def pure(node) -> bool:
-    """Side-effect free to evaluate speculatively (names, constants, attributes, subscripts, comparisons)."""
-    if isinstance(node, (ast.Name, ast.Constant)):
-        return True
-    if isinstance(node, ast.Attribute):
-        return pure(node.value)
-    if isinstance(node, ast.Subscript):
-        return pure(node.value) and pure(node.slice)
-    if isinstance(node, ast.Compare):
-        return pure(node.left) and all(pure(c) for c in node.comparators)
-    if isinstance(node, ast.BoolOp):
-        return all(pure(v) for v in node.values)
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):
-        return pure(node.operand)
-    if isinstance(node, ast.Tuple):
-        return all(pure(e) for e in node.elts)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("hash", "id"):
+            return True
+        if isinstance(n, ast.Attribute) and n.attr in ("__hash__", "__eq__", "_hash"):
+            return True
     return False
 
 
@@ -99,7 +84,7 @@ def collect(tree) -> dict:
         if fn:
             if isinstance(n, ast.Compare) and len(n.ops) == 1 and op_index(n.ops[0]) >= 0:
                 sites[id(n)] = "C"
-            elif isinstance(n, ast.BoolOp) and all(_thunk_ok(v) for v in n.values):
+            elif isinstance(n, ast.BoolOp):
                 sites[id(n)] = "B"
             elif isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not):
                 sites[id(n)] = "N"
@@ -111,19 +96,19 @@ def collect(tree) -> dict:
 
 
 def bool_nodes(tree) -> set:
-    """ids of expressions whose value is only used for its truth value."""
+    """ids of expressions whose value is only used for its truth value (kept for tooling; the rule no longer
+    relies on it). Operands of a BoolOp are truth-only only when the BoolOp itself is: `(a and b) or c` used
+    as a value hands the inner BoolOp's value to the caller."""
     out = set()
-    for n in ast.walk(tree):
+    for n in ast.walk(tree):  # parents are visited before children
         if isinstance(n, (ast.If, ast.While, ast.IfExp, ast.Assert)):
             out.add(id(n.test))
         elif isinstance(n, ast.comprehension):
             out.update(id(i) for i in n.ifs)
         elif isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not):
             out.add(id(n.operand))
-        elif isinstance(n, ast.BoolOp):
-            out.update(id(v) for v in n.values[:-1])
-            if id(n) in out:
-                out.add(id(n.values[-1]))
+        elif isinstance(n, ast.BoolOp) and id(n) in out:
+            out.update(id(v) for v in n.values)
     return out
 
 
@@ -189,13 +174,13 @@ def classify(old_tree, a, b):
 
 def droppable(kind, j, mask: int) -> bool:
     """True when the mutated expression cannot behave differently given the recorded summary."""
+    if mask & UNKNOWN_BIT:
+        return False
     if not mask & EVAL_BIT:
-        return True  # the site never ran in the giant's recorded run
+        return True  # the site never ran in any recorded run
     if kind == "C":
         return not mask & (1 << j)
-    if kind == "B":
-        return not mask & ALT_BIT
-    return False  # N: removing `not` always differs once evaluated
+    return False  # B and N: a swap or a removed `not` can differ on any evaluation
 
 
 def drops(path, patch_changes, old_text, new_text, summaries, srcreaders=0):

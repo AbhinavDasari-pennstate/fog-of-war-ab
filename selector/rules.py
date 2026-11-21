@@ -362,8 +362,8 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
 def _weak(ctx: Ctx, changes) -> int:
     """R10: bits of tests a single operator mutation in a function body provably cannot affect."""
     summaries = ctx.m.weakmut
-    if not summaries or len(changes) != 1:
-        return 0
+    if not summaries or len(changes) != 1 or getattr(ctx.m, "weakmut_rec", None) != weakmut.RECORDER_VERSION:
+        return 0  # no profile, or one written by another recorder version
     ch = changes[0]
     path = ch.path_new
     if ch.status != "modified" or ch.path_old != path or not path.startswith("sqlglot/") or not path.endswith(".py"):

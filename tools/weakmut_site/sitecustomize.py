@@ -15,15 +15,16 @@ if os.environ.get("WM_OUT") and os.environ.get("WM_SRC"):
     import wm_transform as _tr
 
     builtins._wm_c = _rt.wm_c
-    builtins._wm_b = _rt.wm_b
-    builtins._wm_n = _rt.wm_n
-    _SRC = os.path.realpath(os.environ["WM_SRC"])
+    builtins._wm_m = _rt.wm_m
+    _SRC = os.path.abspath(os.environ["WM_SRC"])
 
     class _Loader(importlib.machinery.SourceFileLoader):
         def get_code(self, fullname):
             path = self.get_filename(fullname)
             data = self.get_data(path)
-            rel = os.path.relpath(os.path.realpath(path), _SRC)
+            rel = os.path.relpath(os.path.abspath(path), _SRC)
+            if rel.startswith(".."):  # reached through a symlink: compare real paths on both sides
+                rel = os.path.relpath(os.path.realpath(path), os.path.realpath(_SRC))
             return _tr.compile_instrumented(data, path, rel)
 
     class _Finder:
@@ -33,8 +34,9 @@ if os.environ.get("WM_OUT") and os.environ.get("WM_SRC"):
                 return None
             spec = importlib.machinery.PathFinder.find_spec(name, path)
             if spec is not None and isinstance(spec.loader, importlib.machinery.SourceFileLoader):
-                real = os.path.realpath(spec.origin or "")
-                if real.startswith(os.path.join(_SRC, "sqlglot") + os.sep):
+                origin = os.path.abspath(spec.origin or "")
+                if origin.startswith(os.path.join(_SRC, "sqlglot") + os.sep) or os.path.realpath(origin).startswith(
+                        os.path.join(os.path.realpath(_SRC), "sqlglot") + os.sep):
                     spec.loader = _Loader(spec.loader.name, spec.loader.path)
             return spec
 

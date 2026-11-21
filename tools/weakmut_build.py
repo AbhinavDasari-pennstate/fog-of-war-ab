@@ -46,6 +46,37 @@ def run_one(py, src, work, tid, timeout, seed):
     return r.returncode, secs, summ, r.stdout[-400:]
 
 
+def tree_hash(src):
+    import hashlib
+
+    h = hashlib.sha256()
+    for dp, dn, fn in sorted(os.walk(os.path.join(src, "sqlglot"))):
+        dn.sort()
+        for f in sorted(fn):
+            if f.endswith(".py"):
+                h.update(os.path.relpath(os.path.join(dp, f), src).encode())
+                h.update(open(os.path.join(dp, f), "rb").read())
+    return h.hexdigest()
+
+
+def merge(per_seed):
+    """Union over seeds; a site whose mask differs between seeds (or is missing in one) gets every bit, so it is never dropped."""
+    import weakmut as W
+
+    keys = set()
+    for one in per_seed:
+        keys |= set(one)
+    out, unstable = {}, 0
+    for k in keys:
+        masks = [one.get(k, 0) for one in per_seed]
+        if len(set(masks)) == 1:
+            out[k] = masks[0]
+        else:
+            unstable += 1
+            out[k] = W.EVAL_BIT | W.ALT_BIT | W.UNKNOWN_BIT | 0x3FF
+    return out, unstable
+
+
 def pack(summ):
     per = {}
     for key, mask in summ.items():
@@ -63,27 +94,38 @@ def main():
     ap.add_argument("--work", required=True)
     ap.add_argument("--out", default=os.path.join(ROOT, "maps", "weakmut.bin"))
     ap.add_argument("--timeout", type=int, default=3000)
-    ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
+    ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
+    ap.add_argument("--allow-few-seeds", action="store_true")
     a = ap.parse_args()
     tests = {t["number"]: t["id"] for t in json.load(open(a.tests))["tests"]}
     os.makedirs(a.work, exist_ok=True)
-    data = {"v": 1, "tests": {}}
+    sys.path.insert(0, os.path.join(ROOT, "selector"))
+    import weakmut as W
+
+    src = os.path.realpath(a.src)
+    stamp = {"rec": W.RECORDER_VERSION, "src": tree_hash(src)}
+    data = {"v": 2, **stamp, "tests": {}}
     if os.path.exists(a.out):
-        data = marshal.loads(zlib.decompress(open(a.out, "rb").read()))
+        old = marshal.loads(zlib.decompress(open(a.out, "rb").read()))
+        if old.get("rec") == stamp["rec"] and old.get("src") == stamp["src"]:
+            data = old  # same recorder and same source: extend
     for n in a.numbers:
-        summ, bad = {}, False
+        per_seed, bad = [], False
         for seed in a.seeds:
-            rc, secs, one, tail = run_one(a.py, os.path.realpath(a.src), a.work, tests[n], a.timeout, seed)
+            rc, secs, one, tail = run_one(a.py, src, a.work, tests[n], a.timeout, seed)
             print(f"{n} {tests[n]} seed {seed} exit {rc} {secs:.1f}s sites {len(one)}", flush=True)
             if rc != 0:
                 print(tail, flush=True)
-                bad = True  # a failing recorded run proves nothing: no entry, so the test is never dropped
+                bad = True
                 break
-            for k, v in one.items():
-                summ[k] = summ.get(k, 0) | v  # union over seeds: a site seen in any run is kept as seen
-        if bad:
-            continue
-        data["tests"][n] = {"id": tests[n], "sites": pack(summ)}
+            per_seed.append(one)
+        if bad or len(per_seed) < 5 and not a.allow_few_seeds:
+            data["tests"].pop(n, None)  # a failed or short recording proves nothing: the test is never dropped
+            print(f"{n}: entry removed", flush=True)
+        else:
+            summ, unstable = merge(per_seed)
+            print(f"{n}: {len(summ)} sites, {unstable} sites differ between seeds (all bits set)", flush=True)
+            data["tests"][n] = {"id": tests[n], "sites": pack(summ)}
         with open(a.out, "wb") as f:
             f.write(zlib.compress(marshal.dumps(data), 9))
     print("bytes", os.path.getsize(a.out))

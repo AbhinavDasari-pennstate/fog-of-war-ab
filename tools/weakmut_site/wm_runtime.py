@@ -11,7 +11,6 @@ OPFN = (operator.lt, operator.le, operator.gt, operator.ge, operator.eq, operato
         operator.is_, operator.is_not, lambda a, b: a in b, lambda a, b: a not in b)
 _SAFE_IN = (list, tuple, set, frozenset, dict)
 EVAL = 1 << 10
-ALT = 1 << 11
 OUT = os.environ.get("WM_OUT", "")
 SEEN = {}
 _fd = [None, -1]
@@ -94,74 +93,31 @@ def _alt(opi, a, b, r):
 
 
 _busy = [False]
+ALL = (1 << 10) - 1
 
 
-def wm_c(key, opi, a, b):
+def wm_m(key):
+    """Marks the site as reached, BEFORE its operands run (an operand that raises still counts as ran). Returns False."""
+    if not SEEN.get(key, 0) & EVAL:
+        _note(key, EVAL)
+    return False
+
+
+def wm_c(key, opi, taint, a, b):
     r = OPFN[opi](a, b)
     if _busy[0]:
+        return r
+    if taint:  # an operand may come from hash()/id(): its order alternatives are process dependent
+        _note(key, EVAL | ALL)
         return r
     _busy[0] = True
     try:
         bits = EVAL | _alt(opi, a, b, r)
     except BaseException:
-        bits = EVAL | 0x3FF
+        bits = EVAL | ALL
     finally:
         _busy[0] = False
     m = SEEN.get(key, 0)
     if bits & ~m:
         _note(key, bits)
     return r
-
-
-def wm_n(key, x):
-    if not SEEN.get(key, 0):
-        _note(key, EVAL)
-    return not x
-
-
-def wm_b(key, is_and, bctx, pure, *th):
-    n = len(th)
-    vals = []
-    i = 0
-    while True:
-        v = th[i]()
-        vals.append(v)
-        i += 1
-        if i == n:
-            break
-        if is_and:
-            if not v:
-                break
-        elif v:
-            break
-    orig = vals[-1]
-    differ = False
-    try:
-        k = 0
-        res = None
-        while True:
-            if k < len(vals):
-                v = vals[k]
-            elif pure[k]:
-                v = th[k]()
-                vals.append(v)
-            else:
-                differ = True
-                break
-            k += 1
-            if k == n:
-                res = v
-                break
-            if is_and:  # alternative is `or`
-                if v:
-                    res = v
-                    break
-            elif not v:  # alternative is `and`
-                res = v
-                break
-        if not differ:
-            differ = (bool(orig) != bool(res)) if bctx else (orig is not res)
-    except BaseException:
-        differ = True
-    _note(key, EVAL | (ALT if differ else 0))
-    return orig
