@@ -302,3 +302,66 @@ def test_set_operations_and_array_unique_agg_are_seed_sensitive():
     assert core.seed_sensitive(parse_one("SELECT a FROM t EXCEPT SELECT a FROM u"))
     assert core.seed_sensitive(parse_one("SELECT ARRAY_UNIQUE_AGG(a) FROM t"))
     assert not core.seed_sensitive(parse_one("SELECT a, SUM(b) FROM t GROUP BY a"))
+
+
+def test_distinct_is_seed_sensitive_unless_directly_inside_an_order_free_aggregate():
+    """generators/python.py compiles Distinct to set(...): FIRST and ARRAY_AGG over it expose hash order."""
+    import tpcds_core as core
+
+    core.setup_path(str(PIN))
+    from sqlglot import parse_one
+
+    assert core.seed_sensitive(parse_one("SELECT g, ARRAY_AGG(DISTINCT s) FROM t GROUP BY g"))
+    assert core.seed_sensitive(parse_one("SELECT g, FIRST(DISTINCT s) FROM t GROUP BY g"))
+    assert core.seed_sensitive(parse_one("SELECT DISTINCT s FROM t"))
+    for agg in ("COUNT", "MIN", "MAX", "SUM", "AVG"):
+        assert not core.seed_sensitive(parse_one(f"SELECT g, {agg}(DISTINCT s) FROM t GROUP BY g")), agg
+
+
+def _qualify_meta_patch():
+    """The qualify.py edit of synth-holdout-2-0142: the optimized tree of every query changes, results do not."""
+    import difflib
+
+    import diffparse
+    import tpcds_scope
+
+    f = "sqlglot/optimizer/qualify.py"
+    text = (PIN / f).read_text(encoding="utf-8")
+    old = "store_original_column_identifiers=True,"
+    assert text.count(old) == 1
+    new = text.replace(old, "store_original_column_identifiers=None,")
+    diff = "".join(difflib.unified_diff(text.splitlines(True), new.splitlines(True), f"a/{f}", f"b/{f}"))
+    assert diffparse.parse(f"diff --git a/{f} b/{f}\n" + diff)
+    return {f: new}
+
+
+def test_memo_stays_empty_for_a_union_query_and_fills_for_a_plain_one():
+    """Wiring: query 1 holds a UNION (hash-ordered executor output), query 2 does not. Both trees change under the
+    patch; only query 2 may be remembered."""
+    patched = _qualify_meta_patch()
+    plan = {1: "O", 2: "O"}
+    memo = None
+    for sd in (0, 1):
+        ok, why, memo = sel._run_replay_ex(plan, patched, PIN, 120, sd, memo)
+        assert ok, why
+    assert memo.get("2"), memo
+    assert not memo.get("1"), memo
+
+
+def test_judge_with_an_executor_plan_does_not_stop_at_a_remembered_tree(monkeypatch):
+    """Wiring: with E in the plan the remembered digests must not enter the expected set (no stop at optimize)."""
+    import tpcds_replay as R
+
+    seen = {}
+
+    def fake_fork(q, sql, meta, schema, tables, want, limit, expected=None, probe=False):
+        seen["O"] = list(expected["O"])
+        seen["probe"] = probe
+        return {"ok": True, "O": "pristine", "G": {}, "tables": []}
+
+    monkeypatch.setattr(R, "_fork_run", fake_fork)
+    e = {"O": ["pristine"], "G": {}, "E": [], "T": [], "tables": [], "cpu": 0.1, "P": []}
+    R._judge(1, e, {}, "", {}, {}, ("E",), {}, ("remembered",))
+    assert "remembered" not in seen["O"]
+    R._judge(1, e, {}, "", {}, {}, ("O",), {}, ("remembered",))
+    assert "remembered" in seen["O"]

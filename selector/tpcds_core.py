@@ -257,12 +257,22 @@ class Stop(Exception):
 #   INTERSECT / EXCEPT keep the left order (Counter and a membership set); joins and groups are insertion-ordered dicts.
 # An optimized tree that holds a set operation or ArrayUniqueAgg (or anything unknown) is never reused across seeds.
 _SEED_SENSITIVE = frozenset(("Union", "Intersect", "Except", "SetOperation", "ArrayUniqueAgg", "Anonymous"))
+# generators/python.py compiles Distinct to set(...): FIRST, ARRAYAGG and the like expose its order. Only an order-free
+# aggregate directly around it is safe.
+_ORDER_FREE_PARENTS = frozenset(("Count", "Min", "Max", "Sum", "Avg"))
+
+
+def _names(node):
+    return {c.__name__ for c in type(node).__mro__}
 
 
 def seed_sensitive(tree) -> bool:
     try:
         for node in tree.walk():
-            if type(node).__name__ in _SEED_SENSITIVE or any(c.__name__ in _SEED_SENSITIVE for c in type(node).__mro__):
+            n = _names(node)
+            if n & _SEED_SENSITIVE:
+                return True
+            if "Distinct" in n and not (node.parent is not None and type(node.parent).__name__ in _ORDER_FREE_PARENTS):
                 return True
         return False
     except BaseException:  # noqa: BLE001
