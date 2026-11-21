@@ -1,4 +1,4 @@
-"""Board probe P3 (not a real entry). v11 selection; constant-only commits with tests dropped (missed = failing ones).\ncode = costA_halfsec + 512*costFixture_halfsec, offset 400000.\n(older notes follow) P2: v8.3 selection; on non-constant sqlglot code commits drop every test >= 2 s.
+"""Board probe P4 (not a real entry). v11 selection; constant-only commits with tests split: c1 def/lambda body (dropped -> missed = failing c1), c2 class/module level in a Call, c3 class/module plain data. code = c1_half + 128*c2_half + 16384*c3_half, offset 400000.\nP3: v11 selection; constant-only commits with tests dropped (missed = failing ones).\ncode = costA_halfsec + 512*costFixture_halfsec, offset 400000.\n(older notes follow) P2: v8.3 selection; on non-constant sqlglot code commits drop every test >= 2 s.
 missed = commits where a dropped giant really fails. code = nG + 32*savedG_s + 4096*costFixture_s (offset 400000).
 (old P1 notes follow)
 
@@ -91,6 +91,48 @@ def subset(target, avail):
     return pick or [min(avail, key=lambda n: DUR[n])] if target == 0 else pick
 
 
+import ast as _ast
+import re as _re
+SRC = Path(os.environ.get("BR_SRC", "/app/sqlglot-src"))
+
+
+def const_category(txt):
+    """1 = literal inside a def/lambda body, 2 = class/module level inside a Call, 3 = class/module level plain data."""
+    try:
+        f = next(ln[6:].strip() for ln in txt.splitlines() if ln.startswith("+++ b/"))
+        old = None
+        cur = None
+        for ln in txt.splitlines():
+            m = _re.match(r"@@ -(\d+)", ln)
+            if m:
+                cur = int(m.group(1))
+                continue
+            if cur is None or ln.startswith("---") or ln.startswith("+++"):
+                continue
+            if ln.startswith("-"):
+                old = cur
+                break
+            if ln.startswith("+"):
+                continue
+            cur += 1
+        tree = _ast.parse((SRC / f).read_text("utf-8"))
+        best = None
+        for node in _ast.walk(tree):
+            lo, hi = getattr(node, "lineno", None), getattr(node, "end_lineno", None)
+            if lo is None or not (lo <= old <= hi):
+                continue
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.Lambda)):
+                if isinstance(node, _ast.Lambda) or old > node.lineno:
+                    return 1
+        for node in _ast.walk(tree):
+            lo, hi = getattr(node, "lineno", None), getattr(node, "end_lineno", None)
+            if lo is not None and lo <= old <= hi and isinstance(node, _ast.Call):
+                return 2
+        return 3
+    except Exception:
+        return 3
+
+
 def main():
     r = subprocess.run([sys.executable, "-S", "-E", str(HERE / "v11.py")], capture_output=True)
     sys.stderr.write(r.stderr.decode("utf-8", "replace")[-2000:])
@@ -103,7 +145,7 @@ def main():
     n_all = len(order)
     def files_of(txt):
         return {ln[4:].strip() for ln in txt.splitlines() if ln.startswith("+++ ")}
-    cost_a, cost_fix, n_a = 0, 0, 0
+    cats = {1: 0, 2: 0, 3: 0}
     for c in order:
         p = DATA / "commits" / f"{c}.patch"
         try:
@@ -113,13 +155,15 @@ def main():
         fs = files_of(txt)
         code_py = bool(fs) and all(f.endswith(".py") and "/sqlglot/" in ("/" + f) and "/tests/" not in ("/" + f) for f in fs)
         if not code_py:
-            cost_fix += cost(rows[c])
             continue
         if const_only(txt) and rows[c] and any(rows[c]):
-            n_a += 1
-            cost_a += cost(rows[c])
-            rows[c] = []
-    code = min(cost_a // 500, 511) + 512 * min(cost_fix // 500, 511)
+            k = const_category(txt)
+            cats[k] += cost(rows[c])
+            if k == 1:
+                rows[c] = []
+    h = lambda ms: min(ms // 500, 127)
+    code = h(cats[1]) + 128 * h(cats[2]) + 16384 * h(cats[3])
+    cost_a, cost_fix, n_a = sum(cats.values()), 0, 0
     dropA = []
     base = sum(cost(rows[c]) for c in order)
     offset = 400_000 if base <= 380_000 else 1_500_000
@@ -148,7 +192,7 @@ def main():
             continue
         rows[c] = new
         rem -= inc
-    sys.stderr.write(f"probe3: N={n_all} nA={n_a} costA_ms={cost_a} costFix_ms={cost_fix} code={code} offset={offset} rem={rem}\n")
+    sys.stderr.write(f"probe4: cats={cats} N={n_all} costA_ms={cost_a} costFix_ms={cost_fix} code={code} offset={offset} rem={rem}\n")
     for c in order:
         print(json.dumps({"commit": c, "workers": rows[c]}))
 
