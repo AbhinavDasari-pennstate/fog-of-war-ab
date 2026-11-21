@@ -250,6 +250,25 @@ class Stop(Exception):
     pass
 
 
+# What the pinned executor does with a hash seed (audit of executor/python.py, env.py, table.py, context.py, planner.py):
+#   python.py set_operation  UNION (distinct): list(set(left.rows).union(set(right.rows))), row order follows the string hashes
+#   env.py ARRAYUNIQUEAGG    list(set(acc))
+#   python.py _execute, planner dag: sets of Step objects (hash by id, not by seed; scheduling only)
+#   INTERSECT / EXCEPT keep the left order (Counter and a membership set); joins and groups are insertion-ordered dicts.
+# An optimized tree that holds a set operation or ArrayUniqueAgg (or anything unknown) is never reused across seeds.
+_SEED_SENSITIVE = frozenset(("Union", "Intersect", "Except", "SetOperation", "ArrayUniqueAgg", "Anonymous"))
+
+
+def seed_sensitive(tree) -> bool:
+    try:
+        for node in tree.walk():
+            if type(node).__name__ in _SEED_SENSITIVE or any(c.__name__ in _SEED_SENSITIVE for c in type(node).__mro__):
+                return True
+        return False
+    except BaseException:  # noqa: BLE001
+        return True
+
+
 class NeedFull(Exception):
     """A probe run (no tables loaded) reached a point where the executor must run."""
 
@@ -321,6 +340,7 @@ def run_query(sql, meta, schema, tables, want=("B", "O", "E", "T"), hook=None, e
                 raise Stop()
             if probe:
                 raise NeedFull()
+            out["risky"] = seed_sensitive(res)
             return res
 
         ex.optimize = optimize

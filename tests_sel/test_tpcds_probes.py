@@ -259,3 +259,46 @@ def test_memo_never_hides_a_failure_that_only_some_seeds_show(tmp_path, capsys):
         chained[sd] = ok
     assert chained == plain, (plain, chained)
     assert not all(chained.values())
+
+
+def test_executor_stage_never_uses_the_memo():
+    """A plan that changes executor lines (stage E) or execute() before optimize (stage B) must run the executor
+    on every seed: the memo is only for unchanged executor code."""
+    import tpcds_replay as R
+
+    for st in ("E", "B", "OE", "BO", "ET", "BOET"):
+        assert R.exec_unchanged(st) is False, st
+    for st in ("P", "O", "T", "OT", "PO"):
+        assert R.exec_unchanged(st) is True, st
+
+
+def test_executor_mutant_chain_matches_independent_replays():
+    """An executor-file mutant gets the same verdict on every seed whether or not a memo is carried."""
+    import diffparse
+    import tpcds_scope
+
+    tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
+    changes = diffparse.parse(M.patch_text(str(PIN), "executor"))
+    sc = tpcds_scope.scope([(c, True) for c in changes], tp, PIN)
+    patched = {c.path_new: diffparse.apply((PIN / c.path_new).read_bytes().decode("utf-8"), c) for c in changes}
+    seeds = sel.replay_seeds(1)[:3]
+    plain = [sel._run_replay(sc.plan, patched, PIN, 120, sd)[0] for sd in seeds]
+    memo, chained = {}, []
+    for sd in seeds:
+        ok, _, memo = sel._run_replay_ex(sc.plan, patched, PIN, 120, sd, memo)
+        chained.append(ok)
+    assert plain == chained, (plain, chained)
+
+
+def test_set_operations_and_array_unique_agg_are_seed_sensitive():
+    """The executor orders UNION DISTINCT rows and ARRAYUNIQUEAGG results by string hashes (executor/python.py
+    set_operation, executor/env.py): a tree holding either is never reused across seeds."""
+    import tpcds_core as core
+
+    core.setup_path(str(PIN))
+    from sqlglot import parse_one
+
+    assert core.seed_sensitive(parse_one("SELECT a FROM t UNION SELECT a FROM u"))
+    assert core.seed_sensitive(parse_one("SELECT a FROM t EXCEPT SELECT a FROM u"))
+    assert core.seed_sensitive(parse_one("SELECT ARRAY_UNIQUE_AGG(a) FROM t"))
+    assert not core.seed_sensitive(parse_one("SELECT a, SUM(b) FROM t GROUP BY a"))

@@ -77,6 +77,11 @@ def _limit(e, job):
     return job.get("per_query_s") or max(10.0, 25 * e["cpu"])
 
 
+def exec_unchanged(want) -> bool:
+    """True when the patch changes no line of the executor or of execute() before optimize()."""
+    return not (set(want) & set("BE"))
+
+
 class _LazyTables(dict):
     """The tables of a plan that leaves the executor alone. Nothing is read until a query needs the executor
     (its optimized tree is one nobody has judged); then all of them are read once, in the warm parent, and every
@@ -103,7 +108,7 @@ def _judge(q, e, meta, sql, schema, tables, want, job, memo=()):
     E in `want`), so a tree with a digest it has already seen gives the same result: the run stops after
     optimize() like one that matched the pristine tree. A tree nobody has seen runs in full.
     Returns (ok, why, O digest to remember or None)."""
-    exec_same = not (set(want) & set("BE"))
+    exec_same = exec_unchanged(want)
     seen = tuple(memo) if exec_same else ()
     ex = e
     if seen:
@@ -134,7 +139,7 @@ def _judge(q, e, meta, sql, schema, tables, want, job, memo=()):
         if st in out and out[st] not in e[st]:
             return False, f"query {q}: the {name} differs", None
     # remember a tree the executor ran on and the test would accept (it is not the pristine tree)
-    keep = out.get("O") if ("E" in out and out.get("O") not in e["O"]) else None
+    keep = out.get("O") if ("E" in out and out.get("O") not in e["O"] and out.get("risky") is False) else None
     return True, "", keep
 
 
@@ -165,7 +170,7 @@ def main():
         memo_in = job.get("memo")
         # a plan that leaves the executor alone can stop before it, so it reads no table until a query needs the
         # executor; a plan with B or E reads what it needs once, up front
-        if all(not (set(st) & set("BE")) for st in plan.values()):
+        if all(exec_unchanged(st) for st in plan.values()):
             tables = _LazyTables(src, schema, need)
         else:
             tables = {t: core.load_table(src, t, schema[t]) for t in sorted(need)}
