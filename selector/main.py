@@ -125,7 +125,9 @@ TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
 # gets the same decisions whatever the machine load. The wall clock is only an emergency stop.
 REPLAY_EST_BUDGET_S = float(os.environ.get("BR_REPLAY_EST", "150"))
 REPLAY_EMERGENCY_WALL_S = float(os.environ.get("BR_REPLAY_WALL", "140"))
-REPLAY_PER_COMMIT_S = float(os.environ.get("BR_REPLAY_COMMIT", "40"))
+REPLAY_PER_SEED_S = float(os.environ.get("BR_REPLAY_SEED_S", "20"))
+REPLAY_PHASE_S = float(os.environ.get("BR_REPLAY_PHASE", "90"))
+T_START = time.monotonic()
 # The replay must cost clearly less than the giant it replaces (build-machine seconds x slack).
 # The board charges CPU at about BOARD_K times the native seconds measured here (v2: 0.6 s native, 1.10 on the board).
 BOARD_K = float(os.environ.get("BR_K", "2.5"))
@@ -192,7 +194,7 @@ def _run_replay(plan, patched, src_root: Path, timeout: float, seed: int):
            "map": str(MAPS_ROOT / "tpcds.z")}
     env = {"PYTHONHASHSEED": str(seed), "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp"}
     try:
-        r = subprocess.run([sys.executable, "-S", "-E", str(Path(__file__).resolve().parent / "tpcds_replay.py")],
+        r = subprocess.run([sys.executable, "-S", str(Path(__file__).resolve().parent / "tpcds_replay.py")],
                            input=json.dumps(job).encode(), capture_output=True, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "replay timed out"
@@ -256,11 +258,19 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
     pending.sort(key=lambda x: (x[0], x[1]))  # cheapest first: the budget buys the most drops
     jobs = []  # (commit, num, chosen, future, est)
 
+    # One absolute deadline for the whole replay phase: 90 s of replay, and never past 150 s after the
+    # selector started (the batch limit is 3 minutes). A seed that cannot finish before it keeps the giant.
+    deadline = min(wall0 + REPLAY_PHASE_S, T_START + REPLAY_EMERGENCY_WALL_S)
+
     def job(sc, patched, seed, limit):
         w0 = time.monotonic()
         ok, why = True, ""
         for sd in replay_seeds(seed):
-            ok, why = _run_replay(sc.plan, patched, src_root, limit, sd)
+            left = deadline - time.monotonic()
+            if left < 3:
+                ok, why = False, "deadline reached before every seed ran"
+                break
+            ok, why = _run_replay(sc.plan, patched, src_root, min(limit, left), sd)
             if not ok:
                 why += f" [seed {sd}]"
                 break
@@ -279,15 +289,18 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
             if spent + est > REPLAY_EST_BUDGET_S:
                 print(f"{commit}: tpcds replay estimate budget spent: giant stays", file=sys.stderr)
                 continue
-            left_wall = REPLAY_EMERGENCY_WALL_S - (time.monotonic() - wall0)
+            left_wall = deadline - time.monotonic()
             if left_wall < 5:
                 print(f"{commit}: tpcds replay emergency wall stop: giant stays", file=sys.stderr)
                 continue
             spent += est
             seed = zlib.crc32(commit.encode()) % 8
-            jobs.append((commit, num, chosen, pool.submit(job, sc, patched, seed, min(REPLAY_PER_COMMIT_S, left_wall)), est))
+            jobs.append((commit, num, chosen, pool.submit(job, sc, patched, seed, REPLAY_PER_SEED_S), est))
         for commit, num, chosen, fut, est in jobs:
-            ok, why = fut.result()
+            try:
+                ok, why = fut.result()
+            except BaseException as exc:  # any failure of the replay machinery keeps the giant
+                ok, why = False, f"replay machinery failed: {type(exc).__name__}"
             why = why.replace("{est:.1f}", f"{est:.1f}")
             print(f"{commit}: tpcds replay {'identical: giant dropped' if ok else 'giant stays'} ({why})", file=sys.stderr)
             if ok:

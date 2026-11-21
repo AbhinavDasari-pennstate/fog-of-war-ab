@@ -83,6 +83,8 @@ def _replay_verdict(name, tmp_path):
     import diffparse
     import tpcds_scope
 
+    tpcds_scope.IMPORT_REPLAY = True  # the import-time path is off by default; these probes exercise it
+
     tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
     changes = diffparse.parse(M.patch_text(str(PIN), name))
     sc = tpcds_scope.scope([(c, True) for c in changes], tp, PIN)
@@ -149,3 +151,17 @@ def test_seed_flaky_mutant_is_caught_by_the_seed_set_and_kept(tmp_path, capsys):
     assert not all(verdicts.values()), verdicts
     got = _run(tmp_path, {"flaky": M.patch_text(str(PIN), "seed_flaky")}, capsys)
     assert got["flaky"] is True
+
+
+def test_replay_child_honours_the_hash_seed(tmp_path):
+    """-E would make the child ignore PYTHONHASHSEED. The seed_flaky mutant fails under seed 0 in the real
+    test, so the seed-0 replay must say 'different' every time, and two runs under one seed must agree."""
+    import diffparse
+    import tpcds_scope
+
+    tp = tpcds_scope.TpcdsMap.load(sel.MAPS_ROOT / "tpcds.z")
+    changes = diffparse.parse(M.patch_text(str(PIN), "seed_flaky"))
+    sc = tpcds_scope.scope([(c, True) for c in changes], tp, PIN)
+    patched = {c.path_new: diffparse.apply((PIN / c.path_new).read_bytes().decode("utf-8"), c) for c in changes}
+    verdicts = [sel._run_replay(sc.plan, patched, PIN, 120, 0)[0] for _ in range(4)]
+    assert verdicts == [False] * 4, verdicts

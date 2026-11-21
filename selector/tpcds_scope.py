@@ -265,6 +265,9 @@ def _scope_file(change, tp: TpcdsMap, src_root) -> tuple[dict, str] | str:
     return plan, f"{path}: " + ", ".join(notes)
 
 
+import os
+
+IMPORT_REPLAY = os.environ.get("BR_IMPORT_REPLAY") == "1"  # replay every query for an import-time edit (off by default)
 SQL_FIXTURE = "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql"
 
 
@@ -334,6 +337,8 @@ def scope(per_file, tp: TpcdsMap, src_root) -> Scope:
             continue
         for q, st in p.items():
             plan.setdefault(q, set()).update(st)
+    if import_time and not IMPORT_REPLAY:
+        return _keep("; ".join(notes) + " (import-time replay is off: it never passed the CPU gate with 5 seeds)")
     if import_time:
         # An edit that runs at import or class creation can be read by any query: the child imports the
         # patched tree fresh (every module, as a pytest session has), and every query is replayed.
