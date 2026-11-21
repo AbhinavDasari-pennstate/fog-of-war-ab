@@ -21,7 +21,7 @@ def main():
     ap.add_argument("--seeds", type=int, nargs="+", default=[0], help="PYTHONHASHSEED values; every seed must pass")
     a = ap.parse_args()
     tests = {t["number"]: t["id"] for t in json.loads((Path(a.data) / "tests.json").read_text())["tests"]}
-    env = dict(os.environ, SKIP_INTEGRATION="0", PYTHONPATH=a.src, PYTHONDONTWRITEBYTECODE="1", PYTHON_CPU_COUNT="2")
+    env = dict(os.environ, PATH=os.path.dirname(a.py) + os.pathsep + os.environ.get("PATH", ""), SKIP_INTEGRATION="0", PYTHONPATH=a.src, PYTHONDONTWRITEBYTECODE="1", PYTHON_CPU_COUNT="2")
     bad = 0
     for rec in json.loads(Path(a.pairs).read_text()):
         patch = str(Path(a.data).resolve() / "commits" / (rec["commit"] + ".patch"))
