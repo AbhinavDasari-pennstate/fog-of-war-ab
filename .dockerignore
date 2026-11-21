@@ -1,0 +1,8 @@
+.venv
+.git
+output*.jsonl
+tests_sel
+plan
+__pycache__
+.coverage*
+.pytest_cache

@@ -1,0 +1,13 @@
+# Blast Radius entry (Fog of War). Built on linux/amd64 by the scorer.
+# Base: the organisers' digest, so Python and SQLite match the labelled environment.
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+
+# sqlglot at the pinned commit (GitHub archive of that exact SHA).
+COPY tools/fetch_sqlglot.py /tmp/fetch_sqlglot.py
+RUN python /tmp/fetch_sqlglot.py /app/sqlglot-src && rm /tmp/fetch_sqlglot.py
+
+COPY selector /app/selector
+RUN python -m compileall -q /app/selector && chmod -R a+rX /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+CMD ["python", "-S", "-E", "/app/selector/main.py"]
