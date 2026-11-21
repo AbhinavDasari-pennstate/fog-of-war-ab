@@ -190,6 +190,49 @@ class Ctx:
                     out |= 1 << t["number"]
         return {"mask": out}
 
+    def import_deps(self, path: str, lo: int, hi: int) -> int:
+        """R2: the tests that can depend on lines lo..hi of `path` when those lines ran while a module imported or was collected.
+
+        Used where the rules used to say `wide(path)` (every importer of the edited module) for an edit of a function that ran at import.
+        What an import-time run of the function can change is what the module bodies that ran it built, and the tests that see that are the
+        importers of those module bodies (the model `imptime` uses for class- and module-level edits): maps/impfn.bin lists, for every function
+        or lambda, the module bodies (sqlglot and test modules, collection included, three seeds) under which it ran. A function nested in the
+        one the edit sits in counts too (a closure the function built, which another body may have called). The import probe adds the tests
+        that import a module the patched tree makes raise. Anything missing keeps `wide(path)`: no map (another interpreter, no collection
+        pass, fewer than three seeds), no range for the lines, a call made by collection itself ("<nomod>"), a module body the import map
+        does not know (a test module), or a probe that cannot run."""
+        w = getattr(self.m, "impfn", None)
+        if w is None:
+            return self.wide(path)
+        ranges, base = w
+        rs = ranges.get(path)
+        hit = [(a, b) for a, b, _ in rs if a <= hi and lo <= b] if rs else []
+        if not hit:
+            return self.wide(path)
+        a0, b0 = min(a for a, _ in hit), max(b for _, b in hit)
+        mods = set()
+        for a, b, ms in rs:
+            if a0 <= a and b <= b0:
+                mods.update(ms)
+        out = 0
+        for f in mods:
+            m = self.m.imports.get(f)
+            if m is None:
+                return self.wide(path)
+            out |= m | self.m.srcreaders.get(f, 0)
+        if path in base or any(f in base for f in mods):  # `import sqlglot` loads it: test_lazy_load runs that in a subprocess
+            for t in self.tests:
+                if t["id"].endswith("test_dialect.py::TestDialect::test_lazy_load"):
+                    out |= 1 << t["number"]
+        wide = self.wide(path)
+        if wide & ~out == 0:  # the importers cover every test the wide answer has (a raising module's importers are among them): no gain, no probe
+            return wide
+        pm = self.probe_mask()
+        if pm is None:
+            return wide
+        self.note(f"R2 {path}:{lo}-{hi}: ran at import under {len(mods)} module bod{'y' if len(mods) == 1 else 'ies'}")
+        return out | pm
+
     def udef(self, path: str, d0: int, d1: int) -> int:
         lm = self.m.lines.get(path)
         if not lm:
@@ -525,7 +568,7 @@ def _func_level(ctx: Ctx, path: str, s) -> int:
     if out == 0 or any(l in un for l in lines):
         out |= ctx.udef(path, d0, d1)
     if any(l in il for l in lines):
-        out |= ctx.wide(path)
+        out |= ctx.import_deps(path, start, end)
     return out
 
 
@@ -649,6 +692,87 @@ def _never_ran(ctx: Ctx, path: str, fn, nested: set) -> bool:
     return any(not (isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant)) for st in fn.body)
 
 
+_DYNAMIC_READS = frozenset({"locals", "vars", "eval", "exec", "_getframe", "currentframe", "signature", "getfullargspec", "getargvalues", "stack"})
+
+
+def _literal_default(n) -> bool:
+    """A default that cannot raise or run code when the def runs: a constant, or a sign on a number."""
+    if isinstance(n, ast.Constant):
+        return True
+    return (isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.USub, ast.UAdd)) and isinstance(n.operand, ast.Constant)
+            and isinstance(n.operand.value, (int, float, complex)) and not isinstance(n.operand.value, bool))
+
+
+def _param_defaults(fn):
+    """[(parameter name, default node)] of every parameter of the def that has a default."""
+    a = fn.args
+    pos = a.posonlyargs + a.args
+    out = [(p.arg, d) for p, d in zip(pos[len(pos) - len(a.defaults):], a.defaults)] if a.defaults else []
+    return out + [(p.arg, d) for p, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None]
+
+
+def _closure_only(ctx: Ctx, path: str, old_fn, new_fn, nested: set) -> bool:
+    """R3: the edit changes literal defaults of a def whose changed parameters are read ONLY inside the bodies of defs nested in it, and
+    no line of those bodies ran while a module imported or is unstable.
+
+    A default is read when a call leaves the parameter out. Such a def builds a closure (`date_delta_to_binary_interval_op(cast=True)`
+    returns `date_delta_to_binary_interval_op_sql`): the new value reaches nothing but the closure's cell, and the cell is read only by the
+    body of the nested def. So the tests that depend on the edit are those that ran that body (the udef union of the def's lines already lists
+    them, the factory's own lines included), and the import-time run of the factory, which cannot raise on a literal, adds nobody. The proof
+    obligations are all structural, and any doubt returns False (the caller widens): a plain `def` (no lambda, no decorator, not nested, not a
+    def whose signature something inspects), a literal old and new default, the changed names occurring nowhere in the factory's own code
+    (its statements, and the decorators, defaults and annotations of nested defs, lambdas and class bodies) nor through locals() and its
+    kin, each nested def that reads one having a body on lines of its own, none of them import-time (importtime.bin) or unstable."""
+    if not isinstance(old_fn, ast.FunctionDef) or not isinstance(new_fn, ast.FunctionDef) or old_fn.decorator_list or id(old_fn) in nested:
+        return False
+    if path.startswith(_SIGNATURE_READ) or not path.startswith("sqlglot/"):
+        return False
+    od, nd = _param_defaults(old_fn), _param_defaults(new_fn)
+    if [n for n, _ in od] != [n for n, _ in nd]:
+        return False
+    names = set()
+    for (n, a), (_, b) in zip(od, nd):
+        if ast.dump(a) != ast.dump(b):
+            if not (_literal_default(a) and _literal_default(b)):
+                return False
+            names.add(n)
+    if not names:
+        return False
+    il = ctx.m.importtime.get(path, ())
+    un = ctx.m.unstable.get(path, ())
+    deferred = []
+    stack = list(old_fn.body)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = n.args
+            stack.extend(n.decorator_list + a.defaults + [d for d in a.kw_defaults if d is not None] + ([n.returns] if n.returns else []))
+            stack.extend(x.annotation for x in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg] if x is not None and x.annotation is not None)
+            if any(isinstance(x, ast.Name) and x.id in names or isinstance(x, (ast.Global, ast.Nonlocal)) and names & set(x.names)
+                   for s in n.body for x in ast.walk(s)):
+                deferred.append(n)
+            continue
+        if isinstance(n, ast.Name) and (n.id in names or n.id in _DYNAMIC_READS):
+            return False
+        if isinstance(n, ast.Attribute) and n.attr in _DYNAMIC_READS:
+            return False
+        if isinstance(n, (ast.Global, ast.Nonlocal)) and names & set(n.names):
+            return False
+        stack.extend(ast.iter_child_nodes(n))
+    w = getattr(ctx.m, "impfn", None)  # the function map must be there to cross-check importtime.bin: no map, no R3
+    if w is None:
+        return False
+    ran = w[0].get(path, ())
+    for g in deferred:
+        first, last = g.body[0].lineno, g.end_lineno or g.body[0].lineno
+        if first <= g.lineno or any(ln in il or ln in un for ln in range(first, last + 1)):
+            return False
+        top = min([g.lineno] + [d.lineno for d in g.decorator_list])
+        if any(top <= a and b <= last for a, b, _ in ran):  # the nested def, or one inside it, ran under a module body
+            return False
+    return True
+
+
 def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree, ranges):
     """Tests that depend on an edit that only changes literal default values of defs, or None when the
     edit is anything else (or the evidence is thin). A literal default is read only when a call leaves
@@ -683,6 +807,7 @@ def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree, ranges):
     il = ctx.m.importtime.get(path, ())
     out = 0
     nested = None
+    new_fns = None
     for fn in fns:
         lo, hi = fn.body[0].lineno, fn.end_lineno
         u = ctx.udef(path, lo, hi)
@@ -695,7 +820,15 @@ def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree, ranges):
             continue
         out |= u
         if any(ln in il for ln in range(lo, hi + 1)):
-            out |= ctx.wide(path)
+            if nested is None:
+                nested = _nested_defs(old_tree)
+            if new_fns is None:
+                new_fns = {id(o): n for o, n in zip((x for x in ast.walk(old_tree) if isinstance(x, pyscope._FUNCS)),
+                                                    (x for x in ast.walk(new_tree) if isinstance(x, pyscope._FUNCS)))}
+            if _closure_only(ctx, path, fn, new_fns.get(id(fn)), nested):
+                ctx.note(f"R3 {path}:{lo}: the changed default reaches only the closure {fn.name} builds")
+                continue
+            out |= ctx.import_deps(path, lo, hi)  # R2: it ran while a module imported
     return out
 
 

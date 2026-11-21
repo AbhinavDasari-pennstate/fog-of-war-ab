@@ -1,0 +1,13 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+index fed01b2..3d6617b 100644
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -2429,7 +2429,7 @@ def date_delta_to_binary_sql(self: Generator, expression: exp.Expr, binary: exp.
+ 
+ 
+ def date_delta_to_binary_interval_op(
+-    cast: bool = True,
++    cast: bool = False,
+ ) -> t.Callable[[Generator, DATETIME_DELTA], str]:
+     def date_delta_to_binary_interval_op_sql(self: Generator, expression: DATETIME_DELTA) -> str:
+         this = expression.this
