@@ -173,10 +173,10 @@ def test_non_utf8_patch_still_gives_one_valid_line_per_commit(tmp_path, capsys):
 def test_exception_in_one_commit_still_prints_a_full_line(tmp_path, capsys, monkeypatch):
     real = selector_main.decide
 
-    def boom(text, src, tests):
+    def boom(text, src, tests, *rest):
         if "boom" in text:
             raise RuntimeError("boom")
-        return real(text, src, tests)
+        return real(text, src, tests, *rest)
 
     monkeypatch.setattr(selector_main, "decide", boom)
     p = make_patch("sqlglot/a.py", OLD, "# boom\n" + OLD).encode()
