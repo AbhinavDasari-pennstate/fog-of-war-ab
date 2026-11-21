@@ -67,8 +67,24 @@ def _full(tests: list[dict]) -> list[list[int]]:
     return [list(w) for w in _FULL[key]]
 
 
-def decide(patch_text: str, src_root: Path, tests: list[dict]) -> list[list[int]]:
-    """Workers for one commit."""
+def _pack(selected, tests: list[dict]) -> list[list[int]]:
+    dur = {t["number"]: round(t["seconds"] * 1000 + 1e-9) for t in tests}
+    return pack.pack({n: dur[n] for n in selected if n in dur})
+
+
+def decide(patch_text: str, src_root: Path, tests: list[dict], maps=None) -> list[list[int]]:
+    """Workers for one commit. With maps: rules R0 to R9; without: the v0 rule."""
+    if maps is not None:
+        import rules
+
+        try:
+            changes = diffparse.parse(patch_text)
+            chosen, why = rules.select(changes, maps, tests, src_root=src_root)
+            print(f"  {why}", file=sys.stderr)
+            return _pack(chosen, tests)
+        except Exception as exc:  # R0: anything unparsable means the widest answer
+            print(f"  fallback to all tests: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return _full(tests)
     try:
         changes = diffparse.parse(patch_text)
         for change in changes:
@@ -82,12 +98,31 @@ def decide(patch_text: str, src_root: Path, tests: list[dict]) -> list[list[int]
         return _full(tests)
 
 
+def _load_maps(tests: list[dict]):
+    """The committed maps, or None (v0 rule) when missing or when test ids disagree with tests.json."""
+    try:
+        root = Path(os.environ.get("BR_MAPS", str(Path(__file__).resolve().parent.parent / "maps")))
+        sys.path.insert(0, str(root.parent))
+        from maps.load import load
+
+        maps = load(str(root))
+        for t in tests:
+            if maps.ids[t["number"]] != t["id"]:
+                print("map ids differ from tests.json: v0 rule", file=sys.stderr)
+                return None
+        return maps
+    except Exception as exc:
+        print(f"maps unavailable ({type(exc).__name__}: {exc}): v0 rule", file=sys.stderr)
+        return None
+
+
 def main(data: Path = DATA, src_root: Path = SRC) -> None:
     tests = json.loads((data / "tests.json").read_text(encoding="utf-8"))["tests"]
+    maps = _load_maps(tests)
     for patch in sorted((data / "commits").glob("*.patch")):
         print(f"{patch.stem}:", file=sys.stderr)
         try:
-            workers = decide(patch.read_bytes().decode("utf-8"), src_root, tests)
+            workers = decide(patch.read_bytes().decode("utf-8"), src_root, tests, maps)
         except Exception as exc:  # one full-suite line per commit, whatever happens
             print(f"  fallback to all tests: {type(exc).__name__}: {exc}", file=sys.stderr)
             workers = _full(tests)

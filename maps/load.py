@@ -45,6 +45,8 @@ def _read(d: str, name: str):
 
 class Maps:
     def __init__(self, d: str):
+        self.dir = d
+        self._mentions = None
         self.sets = _read(d, "sets.bin")
         sets = self.sets
         self.lines = _read(d, "lines.bin")
@@ -80,6 +82,19 @@ class Maps:
             self._importtime = {k: set(v) for k, v in self._importtime.items()}
             self._it_built = True
         return self._importtime
+
+    @property
+    def mentions(self):
+        """(files, {name: [file_index * 100000 + line]}): class- and module-level lines of sqlglot/ that
+        mention a name defined at class or module level (its own definitions excluded)."""
+        if self._mentions is None:
+            p = os.path.join(self.dir, "mentions.bin")
+            if os.path.exists(p):
+                d = _read(self.dir, "mentions.bin")
+                self._mentions = (d["files"], d["mentions"])
+            else:
+                self._mentions = ([], {})
+        return self._mentions
 
     def mask(self, set_id: int) -> int:
         return self.sets[set_id]

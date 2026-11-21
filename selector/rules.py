@@ -1,0 +1,308 @@
+"""Static test selection: rules R0 to R9 from plan/plan.md ("Selector rules").
+
+    select(changes, maps, tests, src_root=None) -> (set of test numbers, reason)
+
+changes: diffparse.parse() output. maps: maps.load.Maps. tests: the "tests" list of
+tests.json. src_root: the pinned sqlglot checkout (old file text). Any doubt widens (R9).
+Stdlib only, never imports sqlglot.
+"""
+
+import bisect
+import os
+import re
+from pathlib import Path
+
+import diffparse
+import pyscope
+
+DEFAULT_SRC = os.environ.get("BR_SRC", "/app/sqlglot-src")
+FIXTURE_ROOT = "tests/fixtures"
+# Words that name no class-level definition; looking them up would only widen.
+_TARGET = re.compile(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*(?::[^=]*)?=(?!=)")
+STOP = frozenset({"True", "False", "None", "self", "cls", "lambda", "not", "and", "or", "in", "is",
+                  "if", "else", "return", "for", "def", "class", "import", "from", "as"})
+
+
+def _bits(mask: int) -> set:
+    out = set()
+    n = 0
+    while mask:
+        low = (mask & -mask).bit_length() - 1
+        out.add(n + low)
+        mask >>= low + 1
+        n += low + 1
+    return out
+
+
+class Ctx:
+    def __init__(self, maps, tests, src_root):
+        self.m = maps
+        self.src = Path(src_root)
+        self.tests = tests
+        self.all = 0
+        self.by_file: dict[str, int] = {}
+        for t in tests:
+            self.all |= 1 << t["number"]
+            self.by_file[t["file"]] = self.by_file.get(t["file"], 0) | (1 << t["number"])
+        self.notes: list[str] = []
+
+    def note(self, s: str):
+        self.notes.append(s)
+
+    # ---- widening -------------------------------------------------------------------------
+    def wide(self, path: str) -> int:
+        """Every test that imports the module (R9); unknown module means the whole suite."""
+        m = self.m.imports.get(path)
+        sr = self.m.srcreaders.get(path, 0)
+        if m is None:
+            if path in self.by_file:
+                return self.by_file[path] | sr
+            return self.all
+        return m | sr | self.m.files.get(path, 0)
+
+    def udef(self, path: str, d0: int, d1: int) -> int:
+        lm = self.m.lines.get(path)
+        if not lm:
+            return 0
+        sets = self.m.sets
+        u = 0
+        for ln in range(d0, d1 + 1):
+            sid = lm.get(ln)
+            if sid:
+                u |= sets[sid]
+        return u
+
+
+def _blocks(change):
+    """(removed [(old_lineno, text)], added [text], p) per contiguous edit; p = old line before it."""
+    blocks = []
+    for h in change.hunks:
+        cur = h.old_start if h.old_count else h.old_start + 1
+        blk = None
+        for op, text in h.lines:
+            if op == " ":
+                blk = None
+                cur += 1
+            else:
+                if blk is None:
+                    blk = ([], [], cur - 1)
+                    blocks.append(blk)
+                if op == "-":
+                    blk[0].append((cur, text))
+                    cur += 1
+                else:
+                    blk[1].append(text)
+    return blocks
+
+
+def _stmts_near(ctx: Ctx, path: str, ln: int):
+    """The statement holding ln, else the statements just before and after it."""
+    s = ctx.m.stmt(path, ln)
+    if s is not None:
+        return [s]
+    rec = ctx.m.stmts.get(path)
+    if rec is None:
+        return []
+    starts = rec[0]
+    i = bisect.bisect_right(starts, ln) - 1
+    out = []
+    for j in (i, i + 1):
+        if 0 <= j < len(starts):
+            s = ctx.m.stmt(path, starts[j])
+            if s is not None:
+                out.append(s)
+    return out
+
+
+def _tokens(texts):
+    return {t for t in pyscope.names_in(texts) if t not in STOP and not t.isdigit()}
+
+
+def _mentions(ctx: Ctx, names) -> int:
+    """Tests that depend on class- or module-level statements that mention a changed name."""
+    files, idx = ctx.m.mentions
+    out = 0
+    for n in names:
+        for code in idx.get(n, ()):
+            f, ln = files[code // 100000], code % 100000
+            s = ctx.m.stmt(f, ln)
+            if s is None:
+                continue
+            if s[5]:
+                out |= ctx.m.names_class.get(s[5], 0) or ctx.m.files.get(f, 0)
+            else:
+                out |= ctx.m.files.get(f, 0)
+    return out
+
+
+def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_texts=(), added_texts=()) -> int:
+    m = ctx.m
+    start, end, kind, d0, d1, cls = s
+    il = m.importtime.get(path, ())
+    un = m.unstable.get(path, ())
+    sets = m.sets
+    lm = m.lines.get(path, {})
+    # A continuation line of a multi-line class/module statement that never ran at import
+    # (a lambda body inside a table) is credited exactly by coverage.
+    sid = lm.get(ln)
+    if start < end and sid and ln not in il and ln not in un:
+        return sets[sid]
+    out = m.stmt_mask(path, ln)
+    if d0:  # def header or decorator: callers run the body, so the def's coverage decides
+        out |= ctx.udef(path, d0, d1)
+        name = pyscope.def_name(old_lines[d0 - 1]) if d0 - 1 < len(old_lines) else ""
+        if name:
+            out |= m.names_attr.get(name, 0)
+    first = old_lines[start - 1] if start - 1 < len(old_lines) else ""
+    if first.lstrip().startswith("class ") and ln == start:  # bases or keywords of the class change
+        return out | (m.names_class.get(cls, 0) if cls else 0) | m.files.get(path, 0) * (0 if cls else 1)
+    # names whose value flows to other class or module statements at import time
+    diff = set(_tokens(removed_texts)) ^ set(_tokens(added_texts))
+    if ln == start and _TARGET.match(first):
+        diff.add(_TARGET.match(first).group(1))
+    out |= _mentions(ctx, diff)
+    # B: tests that ran a line naming the assigned attribute or a changed name or key
+    names = _tokens(texts)
+    t = _TARGET.match(first)
+    if t:
+        names.add(t.group(1))
+    b = 0
+    for n in names:
+        b |= m.names_attr.get(n, 0)
+    # A: tests that used the enclosing class (or a subclass); a test is hit only if it does both
+    a = m.names_class.get(cls, 0) if cls else 0
+    if a:
+        out |= (a & b) if b else a
+    else:
+        f = m.files.get(path, 0)
+        out |= (f & b) if (b and f) else (b or f)
+    if out == 0:
+        out = ctx.wide(path)
+    return out
+
+
+def _func_level(ctx: Ctx, path: str, s) -> int:
+    m = ctx.m
+    start, end, kind, d0, d1, cls = s
+    il = m.importtime.get(path, ())
+    un = m.unstable.get(path, ())
+    out = m.stmt_mask(path, start)
+    lines = range(start, end + 1)
+    if out == 0 or any(l in un for l in lines):
+        out |= ctx.udef(path, d0, d1)
+    if any(l in il for l in lines):
+        out |= ctx.wide(path)
+    return out
+
+
+def _py_lines(ctx: Ctx, path: str, change, old_lines, is_test_file: bool) -> int:
+    m = ctx.m
+    out = 0
+    if m.stmts.get(path) is None:
+        # no statement table: never executed by a test; tests that import or read it decide
+        return ctx.wide(path) if path in m.imports else m.srcreaders.get(path, 0)
+    for removed, added, p in _blocks(change):
+        touched = [ln for ln, _ in removed]
+        if not removed or len(added) > len(removed):
+            touched += [p, p + 1]
+        texts = [t for _, t in removed] + added
+        for ln in touched:
+            for s in _stmts_near(ctx, path, ln):
+                kind = s[2]
+                if kind == "function":
+                    out |= _func_level(ctx, path, s)
+                elif is_test_file:
+                    out |= ctx.by_file.get(path, 0)
+                else:
+                    out |= _class_level(ctx, path, s, ln, texts, old_lines, [t for _, t in removed], added)
+        if not _stmts_near_any(ctx, path, touched):
+            out |= ctx.wide(path)
+    return out
+
+
+def _stmts_near_any(ctx, path, touched):
+    return any(_stmts_near(ctx, path, ln) for ln in touched)
+
+
+def _reads(ctx: Ctx, path: str) -> int:
+    m = ctx.m
+    out = m.reads.get(path, 0)
+    parts = path.split("/")
+    for i in range(1, len(parts)):  # directories listed or walked by a test
+        out |= m.reads.get("/".join(parts[:i]), 0)
+    return out
+
+
+def _comment_or_blank(text: str) -> bool:
+    return text == "" or text.startswith("--")
+
+
+def _data_file(ctx: Ctx, path: str, change) -> tuple[int, str]:
+    """R1 and R2: a non-Python file."""
+    m = ctx.m
+    if path.endswith(".sql") and change is not None and change.hunks and change.status == "modified":
+        texts = [t for h in change.hunks for op, t in h.lines if op in "+-"]
+        if all(_comment_or_blank(t) for t in texts):
+            return 0, f"R2 {path}: only comment or blank lines (dropped by _filter_comments)"
+    out = _reads(ctx, path)
+    if path.startswith(FIXTURE_ROOT + "/") and path not in m.reads:
+        for k, v in m.reads.items():  # unknown fixture: everything that reads fixtures
+            if k.startswith(FIXTURE_ROOT) and not k.endswith(".gz"):
+                out |= v
+        return out, f"R2 {path}: not in reads, all fixture readers"
+    return out, f"{'R2' if path.startswith('tests/') else 'R1'} {path}"
+
+
+def _one(ctx: Ctx, change) -> tuple[int, str]:
+    m = ctx.m
+    path = change.path_new
+    old = change.path_old
+    status = change.status
+    is_py = path.endswith(".py") and old.endswith(".py")
+    if status == "binary":
+        return _data_file(ctx, path, None)
+    if status == "added" and change.path_old != change.path_new:
+        old = path
+    if status == "added":
+        if is_py and (path.startswith("sqlglot/") or os.path.basename(path) in ("conftest.py", "helpers.py")):
+            return ctx.all, f"R9 {path}: new module"
+        return _data_file(ctx, path, None)
+    if status in ("deleted", "renamed") or old != path:
+        if old.endswith(".py") or path.endswith(".py"):
+            return ctx.wide(old) | ctx.wide(path), f"R9 {old}: {status}"
+        return _reads(ctx, old) | _reads(ctx, path), f"R1 {old}: {status}"
+    if not is_py:
+        return _data_file(ctx, path, change)
+    sr = m.srcreaders.get(path, 0)
+    old_text = (ctx.src / path).read_bytes().decode("utf-8")
+    new_text = diffparse.apply(old_text, change)  # PatchError means R9 in the caller
+    if pyscope.cookie(old_text) != pyscope.cookie(new_text):
+        return ctx.wide(path) | sr, f"R3 {path}: encoding declaration changed"
+    try:
+        new_tree = pyscope.parse(new_text, path)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return ctx.wide(path) | sr, f"R3 {path}: does not parse"
+    old_tree = pyscope.parse(old_text, path)
+    if pyscope.dump(old_tree) == pyscope.dump(new_tree):
+        if any("\r" in t for h in change.hunks for _, t in h.lines):
+            return ctx.wide(path) | sr, f"R9 {path}: carriage return in a changed hunk"
+        return sr, f"R4 {path}: ast unchanged" + (" (source readers)" if sr else "")
+    if not pyscope.compiles(new_tree, path):
+        return ctx.wide(path) | sr, f"R3 {path}: does not compile"
+    is_test = path.startswith("tests/") and os.path.basename(path).startswith("test_")
+    out = _py_lines(ctx, path, change, old_text.split("\n"), is_test) | sr
+    return out, f"R6/R7 {path}"
+
+
+def select(changes, maps, tests, src_root=None):
+    ctx = Ctx(maps, tests, src_root or DEFAULT_SRC)
+    mask = 0
+    for ch in changes:
+        try:
+            got, why = _one(ctx, ch)
+        except Exception as exc:  # any doubt widens
+            path = ch.path_new or ch.path_old
+            got, why = ctx.wide(path), f"R9 {path}: {type(exc).__name__}: {exc}"
+        ctx.note(why)
+        mask |= got
+    return _bits(mask & ctx.all), "; ".join(ctx.notes)
