@@ -96,6 +96,25 @@ class Maps:
                 self._mentions = ([], {}, {})
         return self._mentions
 
+    @property
+    def weakmut(self):
+        """{test number: {path: {(line, col, end_line, end_col, kind): mask}}} from weakmut.bin (selector/weakmut.py);
+        empty when the file is missing or a test id disagrees with ids.bin."""
+        w = getattr(self, "_weakmut", None)
+        if w is None:
+            w = {}
+            try:
+                if os.path.exists(os.path.join(self.dir, "weakmut.bin")):
+                    d = _read(self.dir, "weakmut.bin")
+                    self.weakmut_rec = d.get("rec")
+                    for n, rec in d.get("tests", {}).items():
+                        if n < len(self.ids) and self.ids[n] == rec["id"]:
+                            w[n] = rec["sites"]
+            except Exception:
+                w = {}  # a damaged file only disables the rule
+            self._weakmut = w
+        return w
+
     def mask(self, set_id: int) -> int:
         return self.sets[set_id]
 

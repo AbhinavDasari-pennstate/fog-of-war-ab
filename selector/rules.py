@@ -14,6 +14,7 @@ from pathlib import Path
 
 import diffparse
 import pyscope
+import weakmut
 
 DEFAULT_SRC = os.environ.get("BR_SRC", "/app/sqlglot-src")
 FIXTURE_ROOT = "tests/fixtures"
@@ -358,6 +359,31 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
     return out, f"R6/R7 {path}"
 
 
+def _weak(ctx: Ctx, changes) -> int:
+    """R10: bits of tests a single operator mutation in a function body provably cannot affect."""
+    summaries = ctx.m.weakmut
+    if not summaries or len(changes) != 1 or getattr(ctx.m, "weakmut_rec", None) != weakmut.RECORDER_VERSION:
+        return 0  # no profile, or one written by another recorder version
+    ch = changes[0]
+    path = ch.path_new
+    if ch.status != "modified" or ch.path_old != path or not path.startswith("sqlglot/") or not path.endswith(".py"):
+        return 0
+    try:
+        old_text = (ctx.src / path).read_bytes().decode("utf-8")
+        new_text = diffparse.apply(old_text, ch)
+        if pyscope.cookie(old_text) != pyscope.cookie(new_text):
+            return 0
+        got, note = weakmut.drops(path, ch, old_text, new_text, summaries, ctx.m.srcreaders.get(path, 0))
+    except Exception:  # any doubt keeps the tests
+        return 0
+    if note:
+        ctx.note(note)
+    bits = 0
+    for t in got:
+        bits |= 1 << t
+    return bits
+
+
 def select(changes, maps, tests, src_root=None):
     ctx = Ctx(maps, tests, src_root or DEFAULT_SRC)
     mask = 0
@@ -369,4 +395,5 @@ def select(changes, maps, tests, src_root=None):
             got, why = ctx.wide(path), f"R9 {path}: {type(exc).__name__}: {exc}"
         ctx.note(why)
         mask |= got
+    mask &= ~_weak(ctx, changes)
     return _bits(mask & ctx.all), "; ".join(ctx.notes)
