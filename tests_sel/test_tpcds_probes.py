@@ -1,0 +1,78 @@
+"""Regression probes for the per-query TPC-DS replay: real mutants that break test_execute_tpcds
+(tools/tpcds_mutants.py proves each one fails the real test) must keep test 1106 selected, and
+patches that cannot reach any query must drop it. Needs the pinned sqlglot checkout next to the repo."""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "selector"))
+sys.path.insert(0, str(ROOT / "tools"))
+PIN = Path(os.environ.get("BR_SRC", str(ROOT.parent / "sqlglot-pin")))
+SAMPLE = Path(os.environ.get("BR_SAMPLE", str(ROOT.parent / "kits" / "rwx" / "x" / "sample")))
+GIANT = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+
+pytestmark = pytest.mark.skipif(not (PIN / "sqlglot").exists() or not (SAMPLE / "tests.json").exists(),
+                                reason="pinned sqlglot or sample missing")
+
+import main as sel  # noqa: E402
+import tpcds_mutants as M  # noqa: E402
+
+
+def _run(tmp_path, patches: dict, capsys):
+    (tmp_path / "commits").mkdir()
+    for name, text in patches.items():
+        (tmp_path / "commits" / f"{name}.patch").write_text(text, encoding="utf-8")
+    (tmp_path / "tests.json").write_text((SAMPLE / "tests.json").read_text(encoding="utf-8"), encoding="utf-8")
+    sel.main(tmp_path, PIN)
+    tests = json.loads((tmp_path / "tests.json").read_text())["tests"]
+    num = next(t["number"] for t in tests if t["id"] == GIANT)
+    out = {}
+    for line in capsys.readouterr().out.splitlines():
+        row = json.loads(line)
+        out[row["commit"]] = num in {n for w in row["workers"] for n in w}
+    return out
+
+
+@pytest.mark.parametrize("name", [n for n, v in M.MUTANTS.items() if v[3]])
+def test_real_mutant_keeps_giant(name, tmp_path, capsys):
+    """Each mutant fails the real test (tools/tpcds_mutants.py real <name>), so the giant must stay."""
+    got = _run(tmp_path, {name: M.patch_text(str(PIN), name)}, capsys)
+    assert got[name] is True
+
+
+def test_unreachable_function_change_drops_giant(tmp_path, capsys):
+    """A one-line change in a function no TPC-DS query reaches needs no replay and drops the giant."""
+    f = "sqlglot/parsers/athena.py"
+    text = (PIN / f).read_text(encoding="utf-8")
+    old = "raw_tokens[1:], sql)"
+    assert text.count(old) >= 1
+    import difflib
+
+    new = text.replace(old, "raw_tokens[0:], sql)", 1)
+    diff = "".join(difflib.unified_diff(text.splitlines(True), new.splitlines(True), f"a/{f}", f"b/{f}"))
+    got = _run(tmp_path, {"c": f"diff --git a/{f} b/{f}\n" + diff}, capsys)
+    assert got["c"] is False
+
+
+def test_changed_query_text_keeps_giant(tmp_path, capsys):
+    """A fixture edit that changes the SQL of a query (not just its expected optimized text) stays."""
+    import difflib
+
+    f = "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql"
+    text = (PIN / f).read_text(encoding="utf-8")
+    new = text.replace("SELECT ", "SELECT  ", 1)
+    diff = "".join(difflib.unified_diff(text.splitlines(True), new.splitlines(True), f"a/{f}", f"b/{f}"))
+    got = _run(tmp_path, {"c": f"diff --git a/{f} b/{f}\n" + diff}, capsys)
+    # the first SELECT of the file is inside the first query's SQL or its expected text; either way
+    # the verdict must not be a silent drop of a changed query: only an unchanged (meta, sql) list drops
+    import tpcds_scope
+
+    changed = tpcds_scope._pairs(str(PIN)) != tpcds_scope._pairs(str(PIN), new)
+    assert got["c"] is changed or got["c"] is True
+    if changed:
+        assert got["c"] is True
