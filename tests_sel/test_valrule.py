@@ -395,3 +395,26 @@ def test_transform_rewrites_loads_and_membership():
     out = ast.unparse(tree)
     assert "_mem(x, self.S)" in out and "not _mem(x, S)" in out and "_bulk(self.S) | y" in out
     assert "_gets(self" in out and "_sv(self)" in out and "_sd(self)" in out
+
+
+def test_format_time_calls_are_recorded_by_string(monkeypatch):
+    import types
+
+    import vm_runtime as rt
+
+    log = []
+    monkeypatch.setattr(rt, "_emit", lambda tag, site, key: log.append((tag, site, key)))
+    monkeypatch.setattr(rt, "KEY", "tests/t.py::T::t1")
+    monkeypatch.setattr(rt, "IMPORTING", 0)
+    rt._SEEN.clear()
+    mod = types.SimpleNamespace(format_time=lambda s, m, t=None: s.upper())
+    rt.install_time(mod)
+    assert mod.format_time("%Y", {}) == "%Y".upper()
+    assert log == [("tests/t.py::T::t1", "FT", "'%Y'")]
+
+
+def test_time_mapping_tokens_pick_the_format_strings_that_contain_them(tmp_path):
+    v = make_val(tmp_path, sites=["m.py:5"], reads={"FT": {"'%Y-%m'": 1, "'dd'": 2}, "m.py:5": {}}, derived={}, req2=["m.py:5"], strict=["%mstrict"])
+    assert v.readers("m.py", 5, "'Y'", False, frozenset({"%Y", "%R"}), 1 << 9) == 0b0110 | (1 << 7) | (1 << 9)
+    assert v.readers("m.py", 5, "'Y'", False, frozenset({"zz"}), 0) == 1 << 7  # no recorded string contains it
+    assert v.readers("m.py", 5, "'Y'", False, frozenset(), 0) is None

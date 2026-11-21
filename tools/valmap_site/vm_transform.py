@@ -19,17 +19,19 @@ set_nodes = _m.set_nodes
 
 
 def transform(tree, relpath):
-    for stmt, _, _ in site_nodes(tree):
+    for stmt, _, name in site_nodes(tree):
         site = f"{relpath}:{stmt.lineno}"
         args = [stmt.value, ast.Constant(value=site)]
         ex = [k for k in stmt.value.keys if k is not None]
         spread = len(ex) != len(stmt.value.keys)
-        if spread or any(not isinstance(k, ast.Constant) for k in ex):
+        tm = name in ("TIME_MAPPING", "FORMAT_MAPPING") and relpath.startswith("sqlglot/dialects/")
+        if spread or tm or any(not isinstance(k, ast.Constant) for k in ex):
             # keys written as names or attribute chains: evaluate them once more (a name lookup has no effect) so the
             # recorder can label the runtime key objects with their source text
             args.append(ast.Tuple(elts=[ast.copy_location(ast.parse(ast.unparse(k), mode="eval").body, k) for k in ex], ctx=ast.Load()))
             args.append(ast.Tuple(elts=[ast.Constant(value=_label(k)) for k in ex], ctx=ast.Load()))
             args.append(ast.Constant(value=spread))
+            args.append(ast.Constant(value=tm))
         call = ast.Call(func=ast.Name(id="_vw", ctx=ast.Load()), args=args, keywords=[])
         stmt.value = ast.copy_location(call, stmt.value)
     ast.fix_missing_locations(tree)

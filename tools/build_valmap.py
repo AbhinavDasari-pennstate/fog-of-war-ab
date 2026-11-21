@@ -45,7 +45,7 @@ def failed_tests(d, num):
 
 
 def read_run(d, num):
-    derived, per, created, started, req, bad_sites = set(), {}, set(), set(), set(), set()
+    derived, per, created, started, req, bad_sites, req2 = set(), {}, set(), set(), set(), set(), set()
     for f in glob.glob(os.path.join(d, "vm.*.log")):
         with open(f, errors="replace") as fh:
             for line in fh:
@@ -63,6 +63,8 @@ def read_run(d, num):
                     derived.add((site, key))
                 elif tag == "R":
                     req.add(site)
+                elif tag == "R2":
+                    req2.add(site)
                 elif tag == "B":
                     bad_sites.add(site)
                 else:
@@ -70,7 +72,19 @@ def read_run(d, num):
                     if t is not None:
                         per[(site, key)] = per.get((site, key), 0) | (1 << t)
     created -= bad_sites
-    return derived, per, created, started, failed_tests(d, num), req, bad_sites
+    return derived, per, created, started, failed_tests(d, num), req, bad_sites, req2
+
+
+def strict_tokens(src):
+    """Every string of dialects/dialect.py STRICT_TIME_FORMATS: _with_strict_time_inverse adds these to an inverse mapping
+    depending on which of them it already holds, so an edit of an inverse key can move them."""
+    import ast
+
+    tree = ast.parse(open(os.path.join(src, "sqlglot", "dialects", "dialect.py"), "rb").read())
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "STRICT_TIME_FORMATS" for t in n.targets):
+            return sorted({c.value for c in ast.walk(n.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)})
+    raise SystemExit("STRICT_TIME_FORMATS not found")
 
 
 def main():
@@ -78,6 +92,7 @@ def main():
     ap.add_argument("cmd", choices=["build"])
     ap.add_argument("--maps", default=os.path.join(ROOT, "maps"))
     ap.add_argument("--run", nargs="+", required=True)
+    ap.add_argument("--src", default=os.path.join(os.path.dirname(ROOT), "sqlglot-pin"), help="pinned sqlglot checkout (STRICT_TIME_FORMATS)")
     ap.add_argument("--out", default=os.path.join(ROOT, "maps", "valreads.bin"))
     a = ap.parse_args()
     from load import load
@@ -85,17 +100,18 @@ def main():
     m = load(a.maps)
     num = {t: n for n, t in enumerate(m.ids) if t is not None}
     runs = [read_run(d, num) for d in a.run]
-    derived, created, reqs, bad = set(), set(), set(), set()
+    derived, created, reqs, bad, reqs2 = set(), set(), set(), set(), set()
     keys = set()
-    for dv, per, cr, _, _, rq, bs in runs:
+    for dv, per, cr, _, _, rq, bs, rq2 in runs:
         derived |= dv
         created |= cr
         reqs |= rq
         bad |= bs
+        reqs2 |= rq2
         keys |= set(per)
     reads, differ = {}, 0
     for k in keys:
-        masks = [per.get(k, 0) for _, per, _, _, _, _, _ in runs]
+        masks = [per.get(k, 0) for _, per, _, _, _, _, _, _ in runs]
         if len(set(masks)) > 1:
             differ += 1
             derived.add(k)
@@ -105,10 +121,10 @@ def main():
         reads[k] = u
     allnum = {n for n, t in enumerate(m.ids) if t is not None}
     unrec = set()
-    for _, _, _, started, badt, _, _ in runs:
+    for _, _, _, started, badt, _, _, _ in runs:
         unrec |= (allnum - started) | badt
     pure = ("tests/test_errors.py", "tests/test_helper.py", "tests/test_time.py", "tests/test_sqlglotc.py")
-    unrec = {n for n in unrec if not m.ids[n].startswith(pure)} | {n for _, _, _, _, badt, _, _ in runs for n in badt}
+    unrec = {n for n in unrec if not m.ids[n].startswith(pure)} | {n for _, _, _, _, badt, _, _, _ in runs for n in badt}
     sets, sid = [0], {0: 0}
     table = {}
     for (site, key), mask in reads.items():
@@ -127,13 +143,15 @@ def main():
         "derived": {s: sorted(v) for s, v in der.items()},
         "sites": sorted(created - bad),
         "req": sorted(reqs),
+        "req2": sorted(reqs2),
+        "strict": strict_tokens(a.src),
         "unrecorded": sorted(unrec),
         "runs": len(runs),
     }
     with open(a.out, "wb") as f:
         f.write(zlib.compress(marshal.dumps(out), 9))
     print(f"read pairs {len(reads)} derived {len(derived)} differ-between-runs {differ} sites created {len(created)} "
-          f"req sites {len(reqs)} sets {len(sets)} unrecorded tests {len(unrec)} bytes {os.path.getsize(a.out)}")
+          f"req sites {len(reqs)} req2 {len(reqs2)} sets {len(sets)} unrecorded tests {len(unrec)} bytes {os.path.getsize(a.out)}")
 
 
 if __name__ == "__main__":

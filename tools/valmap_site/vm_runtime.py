@@ -25,6 +25,9 @@ Two more kinds of line exist for the dicts that Expression subclasses call `arg_
 Lines go to $VM_OUT/vm.<pid>.log as "<K>\t<path>:<line>\t<key repr>" with key repr "*" for a bulk read:
   K = "D"      read while a module or class body was running, or outside any test: reaches every user
   K = nodeid   the test whose run read it
+  K = "R2"     bulk read of a TIME_MAPPING / FORMAT_MAPPING dict by the Dialect metaclass (dialects/dialect.py `__new__`), which builds
+               TIME_TRIE, INVERSE_TIME_MAPPING and the format tries from it; their only consumers are sqlglot.time.format_time and
+               tests/test_time.py. Site "FT" records the format strings every format_time call received (see install_time).
   K = "B"      the statement's key spellings do not map one to one onto the runtime keys: the site is unusable
   K = "T"      (key repr empty) this test started and finished its protocol (so its absence of reads means something)
 """
@@ -65,6 +68,10 @@ def _note(rd, key, miss=False):
         f = sys._getframe(2)
         if f.f_code.co_name == "__init_subclass__" and f.f_code.co_filename.endswith("sqlglot/expressions/core.py"):
             tag = "R"
+    if derived and not miss and key == "*" and tag == "D" and getattr(rd, "_tm", False):
+        f = sys._getframe(2)
+        if f.f_code.co_name == "__new__" and f.f_code.co_filename.endswith("sqlglot/dialects/dialect.py"):
+            tag = "R2"
     ck = (tag, site, key if key == "*" or not isinstance(key, (dict, list, set)) else "*", miss)
     if ck in _SEEN:
         return
@@ -118,7 +125,7 @@ def install_miss(mod):
 
 
 class RecDict(dict):
-    __slots__ = ("_vs", "_lb")
+    __slots__ = ("_vs", "_lb", "_tm")
 
     def __getitem__(self, k):
         if dict.__contains__(self, k):
@@ -206,13 +213,14 @@ class RecDict(dict):
 _CREATED = set()
 
 
-def _vw(d, site, keys=None, labels=None, spread=False):
+def _vw(d, site, keys=None, labels=None, spread=False, tm=False):
     if site not in _CREATED:  # "S": this statement ran in this process (a site no run created is unknown to the map)
         _CREATED.add(site)
         _emit("S", site, "")
     r = RecDict(d)
     r._vs = site
     r._lb = None
+    r._tm = tm
     if keys is not None:  # keys written as names or attribute chains: their labels are the source text
         r._lb = dict(zip(keys, labels))
         if len(r._lb) != len(labels) or (not spread and len(d) != len(labels)):  # two spellings of one key, or a key collapsed: unusable
@@ -232,7 +240,7 @@ _SHIM = {}
 
 
 class _Shim:
-    __slots__ = ("_vs", "_lb")
+    __slots__ = ("_vs", "_lb", "_tm")
 
 
 def _shim(site):
@@ -376,3 +384,25 @@ def _sv(o=None, *rest):
         return vars(o, *rest)
     d = vars(o)
     return _SV(d) if hasattr(d, "values") else d
+
+
+def install_time(mod):
+    """Record the format string of every sqlglot.time.format_time call (the only consumer of the tries and inverse mappings
+    derived from TIME_MAPPING / FORMAT_MAPPING). Installed right after sqlglot.time runs, before anything imports the name."""
+    orig = mod.format_time
+
+    def format_time(string, mapping, trie=None):
+        try:
+            derived = IMPORTING > 0 or KEY is None
+            tag = "D" if derived else KEY
+            r = repr(string) if isinstance(string, str) else "*"
+            ck = (tag, "FT", r)
+            if ck not in _SEEN:
+                _SEEN.add(ck)
+                _emit(tag, "FT", r)
+        except Exception:
+            pass
+        return orig(string, mapping, trie)
+
+    format_time.__wrapped__ = orig
+    mod.format_time = format_time

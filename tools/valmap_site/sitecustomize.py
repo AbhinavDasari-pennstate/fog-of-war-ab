@@ -42,6 +42,8 @@ if os.environ.get("VM_OUT") and os.environ.get("VM_SRC"):
                 _rt.IMPORTING -= 1
             if module.__name__ == "sqlglot.expressions.core":
                 _rt.install_miss(module)
+            elif module.__name__ == "sqlglot.time":
+                _rt.install_time(module)
 
     class _Finder:
         @classmethod

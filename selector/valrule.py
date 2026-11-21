@@ -105,6 +105,12 @@ def literal_tree(n) -> bool:
     return False
 
 
+class _E(tuple):
+    """(statement line, key repr, truth changed) with the strings of the key and of the old and new value in .tokens"""
+
+    tokens = frozenset()
+
+
 def entries(old_tree, new_tree, diffs):
     """[(statement line, key repr, truth changed)] of the entries a patch edits, or None when the patch is anything else.
 
@@ -129,7 +135,7 @@ def entries(old_tree, new_tree, diffs):
             if not literal_tree(v) or not literal_tree(nv):
                 continue
             e = (stmt.lineno, key_label(k))
-            vals[e] = (v, nv)
+            vals[e] = (v, nv, k)
             for sub in ast.walk(v):
                 where[id(sub)] = e
     out = []
@@ -141,12 +147,14 @@ def entries(old_tree, new_tree, diffs):
             out.append(e)
     res = []
     for e in out:
-        v, nv = vals[e]
+        v, nv, k = vals[e]
         try:
             changed = bool(ast.literal_eval(v)) != bool(ast.literal_eval(nv))
         except Exception:
             return None
-        res.append((e[0], e[1], changed))
+        r = _E((e[0], e[1], changed))
+        r.tokens = frozenset(c.value for x in (v, nv, k) for c in ast.walk(x) if isinstance(c, ast.Constant) and isinstance(c.value, str))
+        res.append(r)
     return res
 
 
@@ -196,6 +204,11 @@ class Val:
             self.derived = {s: frozenset(v) for s, v in d["derived"].items()}
             self.sites = frozenset(d["sites"])
             self.req = frozenset(d.get("req", ()))
+            self.req2 = frozenset(d.get("req2", ()))
+            self.strict = frozenset(d.get("strict", ()))
+            # format strings seen by sqlglot.time.format_time, with the tests that passed each: [(string, mask)]
+            self.ft = [(None if k == "*" else ast.literal_eval(k), self.sets[i]) for k, i in d["reads"].get("FT", {}).items()]
+            self.ft_derived = bool(d["derived"].get("FT"))
             self.unrecorded = 0
             for n in d["unrecorded"]:
                 self.unrecorded |= 1 << n
@@ -220,7 +233,7 @@ class Val:
             mask |= self.sets[r.get(w, 0)]
         return mask
 
-    def readers(self, path: str, line: int, key: str, truth_changed: bool = False):
+    def readers(self, path: str, line: int, key: str, truth_changed: bool = False, tokens=(), extra: int = 0):
         """Mask of the tests that read the value of `key` in the dict statement at path:line (plus every unrecorded
         test), or None: today's rule applies.
 
@@ -239,6 +252,19 @@ class Val:
             return None
         r = self.reads.get(site, {})
         mask = self.sets[r.get(key, 0)] | self.sets[r.get("*", 0)] | self.unrecorded
+        if site in self.req2:
+            # TIME_MAPPING / FORMAT_MAPPING of a dialect: the metaclass turns the values into the inverse mapping and tries; the
+            # only consumers of those are format_time (every call's format string is recorded: a changed key or value, in either
+            # direction, can only matter to a call whose string contains it, since format_time matches whole keys in the trie
+            # walk) and tests/test_time.py (`extra`). The strict and lax formats are added because _with_strict_time_inverse
+            # inserts them depending on which of them the inverse mapping holds.
+            if self.ft_derived or not tokens:
+                return None
+            toks = set(tokens) | self.strict
+            for text, m in self.ft:
+                if text is None or any(t in text for t in toks):
+                    mask |= m
+            mask |= extra
         if site in self.req:
             mk = "M:" + key
             if truth_changed:

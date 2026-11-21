@@ -749,7 +749,7 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
         try:
             ents = valrule.entries(old_tree, new_tree, diffs)
             if ents:
-                masks = [ctx.val().readers(path, ln, key, tc) for ln, key, tc in ents]
+                masks = [ctx.val().readers(path, ln, key, tc, e.tokens, ctx.by_file.get('tests/test_time.py', 0)) for e in ents for ln, key, tc in [e]]
                 if all(x is not None for x in masks):
                     got = 0
                     for x in masks:
