@@ -52,28 +52,6 @@ def take():
     return out
 
 
-def import_all(src):
-    import sqlglot
-
-    names = []
-    for m in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
-        names.append(m.name)
-    failed = []
-    for n in sorted(names):
-        try:
-            __import__(n)
-        except Exception as e:  # compiled or optional modules
-            failed.append((n, type(e).__name__))
-    from sqlglot.dialects.dialect import Dialect
-
-    for name in sorted(Dialect.classes) if hasattr(Dialect, "classes") else []:
-        try:
-            Dialect.get_or_raise(name)
-        except Exception:
-            pass
-    return failed
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True)
@@ -86,7 +64,7 @@ def main():
         start(src)
     core.setup_path(src)
     t0 = time.process_time()
-    failed = import_all(src)
+    failed = core.import_all(src)
     helpers = core.load_helpers(src)
     qs = core.queries(src, helpers)
     schema = helpers.TPCDS_SCHEMA
@@ -121,25 +99,35 @@ def main():
             d["cov"] = cov
         return d
 
+    def forked(fn):
+        """fn() in a fork of the warm base; its JSON result."""
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(r)
+            try:
+                payload = json.dumps(fn()).encode()
+            except BaseException as e:  # noqa: BLE001
+                payload = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode()
+            with os.fdopen(w, "wb") as f:
+                f.write(payload)
+            os._exit(0)
+        os.close(w)
+        with os.fdopen(r, "rb") as f:
+            data = f.read()
+        os.waitpid(pid, 0)
+        return json.loads(data)
+
     if a.mode == "alone":
         for i in order:
-            r, w = os.pipe()
-            pid = os.fork()
-            if pid == 0:
-                os.close(r)
-                try:
-                    d = one(i)
-                    payload = json.dumps(d).encode()
-                except BaseException as e:  # noqa: BLE001
-                    payload = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode()
-                with os.fdopen(w, "wb") as f:
-                    f.write(payload)
-                os._exit(0)
-            os.close(w)
-            with os.fdopen(r, "rb") as f:
-                data = f.read()
-            os.waitpid(pid, 0)
-            res[i] = json.loads(data)
+            gx = {}
+            for want in ((), ("T",)):  # the other stage sets the replay can run, each from the clean base
+                g = forked(lambda: core.run_query(qs[i][1], qs[i][0], schema, tables, want=want)["G"])
+                if "error" in g:
+                    raise SystemExit(f"variant {want} of query {i}: {g['error']}")
+                gx.update(g)
+            res[i] = forked(lambda: one(i))
+            res[i]["Gx"] = gx
     elif a.mode == "batch":
         # the test: every parse_one first (parent), then each result in order
         from sqlglot import parse_one

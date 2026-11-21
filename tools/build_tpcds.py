@@ -60,12 +60,14 @@ def main():
     meta = None
     pyv = set()
     notok = set()
+    gseen: dict[int, dict[str, set]] = {}
     with tempfile.TemporaryDirectory() as tmp:
         for k, (mode, seed, trace) in enumerate(runs):
             print(f"run {k + 1}/{len(runs)} {mode} seed {seed} trace {trace}", file=sys.stderr, flush=True)
             d = run(a.python, src, mode, seed, trace, os.path.join(tmp, f"r{k}.json"))
             n = d["n"]
             meta = d["meta"]
+            impf = sorted(x[0] for x in d["import_failed"])
             pyv.add(d["py"].split("\n")[0])
             for f, lines in d["base"].items():
                 base.setdefault(f, set()).update(lines)
@@ -82,6 +84,8 @@ def main():
                     notok.add(i)
                 tables[i] = r["tables"]
                 if mode == "alone":
+                    for st, v in {**r["G"], **r.get("Gx", {})}.items():
+                        gseen.setdefault(i, {}).setdefault(st, set()).add(v)
                     cpus.setdefault(i, []).append(r["cpu"])
                     for st, v in r["stage_cpu"].items():
                         scpu.setdefault(i, {}).setdefault(st, []).append(v)
@@ -99,12 +103,14 @@ def main():
         "pin": subprocess.run(["git", "-C", src, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip(),
         "python": sorted(pyv),
         "n": n,
+        "import_failed": impf,
         "meta_sha": [hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()[:16] for m in meta],
         "queries": {
             str(i): {
                 **{st: sorted(seen[i][st]) for st in STAGES},
                 "tables": tables[i], "cpu": round(statistics.median(cpus[i]), 4),
                 "stage_cpu": {st: round(statistics.median(v), 4) for st, v in scpu.get(i, {}).items()},
+                "G": {st: sorted(v) for st, v in gseen[i].items()},
                 "unstable": i in unstable, "mutates": i in notok,
             }
             for i in sorted(seen)

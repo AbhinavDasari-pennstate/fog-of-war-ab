@@ -70,7 +70,7 @@ def _fork_run(q, sql, meta, schema, tables, want, limit, expected=None):
 
 
 def _limit(e, job):
-    return job.get("per_query_s") or max(5.0, 8 * e["cpu"])
+    return job.get("per_query_s") or max(10.0, 25 * e["cpu"])
 
 
 def _judge(q, e, meta, sql, schema, tables, want, job):
@@ -82,6 +82,9 @@ def _judge(q, e, meta, sql, schema, tables, want, job):
         return False, f"query {q}: {out['error']}"
     if not out["ok"]:
         return False, f"query {q}: shared tables or schema changed"
+    for k, g in out.get("G", {}).items():  # sqlglot's global containers after the run, by stages run
+        if g not in e["G"].get(k, ()):
+            return False, f"query {q}: sqlglot's global state after stages {k} differs from the pristine run"
     if "E" in out and out["tables"] != e["tables"]:
         return False, f"query {q}: find_tables gave different tables"
     if not e["E"] and not e["tables"] and "E" in out:
@@ -100,6 +103,9 @@ def main():
     t0 = time.process_time()
     try:
         core.setup_path(src, job.get("patched"))
+        failed = sorted(x[0] for x in core.import_all(src))
+        if failed != tp["import_failed"]:
+            raise RuntimeError(f"modules that fail to import differ: {failed}")
         helpers = core.load_helpers(src)
         qs = core.queries(src, helpers)
         if len(qs) != tp["n"]:

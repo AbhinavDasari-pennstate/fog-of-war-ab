@@ -13,6 +13,7 @@ The digests below are sha256 over repr(), so a type change (1 versus 1.0 versus 
 """
 
 import ast
+import collections
 import csv
 import gzip
 import hashlib
@@ -109,6 +110,32 @@ def load_table(src, table, columns):
     return Table(columns=columns, rows=rows)
 
 
+def import_all(src):
+    """Import every sqlglot module and every dialect, as a whole pytest session has by the time
+    the test runs; the recorder and the replay both start from this state."""
+    import pkgutil
+
+    import sqlglot
+
+    names = []
+    for m in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
+        names.append(m.name)
+    failed = []
+    for n in sorted(names):
+        try:
+            __import__(n)
+        except Exception as e:  # compiled or optional modules
+            failed.append((n, type(e).__name__))
+    from sqlglot.dialects.dialect import Dialect
+
+    for name in sorted(Dialect.classes) if hasattr(Dialect, "classes") else []:
+        try:
+            Dialect.get_or_raise(name)
+        except Exception:
+            pass
+    return failed
+
+
 def table_names(expression):
     from sqlglot import find_tables
 
@@ -175,6 +202,50 @@ def _rows_hash(table):
     return hash(tuple(table.rows)), hash(table.columns), repr(table.column_range)
 
 
+def state_fp(_items=None):
+    """What a query can leave behind in sqlglot's globals for the next one: for every module and
+    class dict of sqlglot, the size and a digest of the keys of each mutable container, the size of
+    each lru_cache and the position of each counter. Values are not read (cheap, and reading them
+    could run sqlglot code). Not a proof of equal state, a tripwire for the usual carriers of
+    cross-query state (caches, registries, id counters)."""
+    import functools
+    import itertools
+
+    items = []
+
+    def one(owner, name, v):
+        t = type(v)
+        if t in (dict, set, list, collections.deque, collections.OrderedDict, collections.defaultdict, collections.Counter):
+            n = len(v)
+            keys = 0
+            if n <= 48 and t is not list:  # small registries: the keys too (cheap)
+                try:
+                    keys = sha(sorted(map(repr, v)))
+                except Exception:
+                    keys = -1
+            items.append((owner, name, t.__name__, n, keys))
+        elif t is functools._lru_cache_wrapper:
+            items.append((owner, name, "lru", v.cache_info().currsize))
+        elif t is itertools.count:
+            items.append((owner, name, "count", repr(v)))
+
+    for mname in sorted(sys.modules):
+        mod = sys.modules[mname]
+        if not mname.startswith("sqlglot") or mod is None:
+            continue
+        for name, v in sorted(vars(mod).items()):
+            if name.startswith("__") and name.endswith("__"):  # __builtins__ differs with -S, __all__ ...
+                continue
+            if isinstance(v, type) and (v.__module__ or "") == mname:
+                for n2, v2 in sorted(vars(v).items()):
+                    one(f"{mname}.{name}", n2, v2)
+            else:
+                one(mname, name, v)
+    if _items is not None:
+        _items.extend(items)
+    return sha(items)
+
+
 class Stop(Exception):
     pass
 
@@ -216,6 +287,7 @@ def run_query(sql, meta, schema, tables, want=("O", "E", "T"), hook=None, expect
     before = {}
     runs = bool(meta.get("execute"))
     if runs and (want & {"O", "E"} or p_diff):
+        want.add("T")  # the state fingerprint is comparable only for the whole pipeline
         used = sorted({t.name for t in find_tables(expression)})
         before = {n: _rows_hash(tables[n]) for n in used}
         orig = ex.optimize
@@ -239,6 +311,7 @@ def run_query(sql, meta, schema, tables, want=("O", "E", "T"), hook=None, expect
     if runs and "T" in want:
         out["T"] = sha(transpile(sql, write="duckdb")[0])
         end("T")
+    out["G"] = {"".join(st for st in "PEOT" if st in out): state_fp()}
     out["ok"] = all(_rows_hash(tables[n]) == before[n] for n in used) and repr(schema) == schema_before
     out["tables"] = used
     return out

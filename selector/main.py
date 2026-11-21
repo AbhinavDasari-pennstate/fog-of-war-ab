@@ -120,10 +120,12 @@ def _load_maps(tests: list[dict]):
 
 
 TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
-# Run-time replay budgets (3 min batch limit, CPU is scored): wall and CPU the replays may use in all.
-REPLAY_WALL_S = float(os.environ.get("BR_REPLAY_WALL", "90"))
-REPLAY_CPU_S = float(os.environ.get("BR_REPLAY_CPU", "70"))
-REPLAY_PER_COMMIT_S = float(os.environ.get("BR_REPLAY_COMMIT", "24"))
+# Run-time replay budgets (3 min batch limit, CPU is scored). The budget is spent in ESTIMATED seconds
+# (the map's build-time measurements times a slack), cheapest replay first, so the same batch always
+# gets the same decisions whatever the machine load. The wall clock is only an emergency stop.
+REPLAY_EST_BUDGET_S = float(os.environ.get("BR_REPLAY_EST", "110"))
+REPLAY_EMERGENCY_WALL_S = float(os.environ.get("BR_REPLAY_WALL", "140"))
+REPLAY_PER_COMMIT_S = float(os.environ.get("BR_REPLAY_COMMIT", "40"))
 # The replay must cost clearly less than the giant it replaces (build-machine seconds x slack).
 REPLAY_SLACK = 1.3
 REPLAY_OVERHEAD_S = 1.2
@@ -213,13 +215,12 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
                         pending.append((est, patch.stem, num, sc, patched, chosen))
             except Exception as exc:
                 print(f"  tpcds refine failed ({type(exc).__name__}: {exc}): giant stays", file=sys.stderr)
-    # replays, cheapest first, inside the batch budgets
+    # replays, cheapest first, inside the budgets
     wall0 = time.monotonic()
-    cpu_used = 0.0
+    spent = 0.0
     import resource
 
     base_cpu = lambda: (lambda r: r.ru_utime + r.ru_stime)(resource.getrusage(resource.RUSAGE_CHILDREN))  # noqa: E731
-    cpu0 = base_cpu()
     pending.sort(key=lambda x: (x[0], x[1]))
     for est, commit, num, sc, patched, chosen in pending:
         gain = dur[num] / 1000.0
@@ -229,11 +230,14 @@ def main(data: Path = DATA, src_root: Path = SRC) -> None:
         if not sc.plan:
             ok, why = True, "no query reaches the changed code"
         else:
-            left_wall = REPLAY_WALL_S - (time.monotonic() - wall0)
-            left_cpu = REPLAY_CPU_S - (base_cpu() - cpu0)
-            if left_wall < est or left_cpu < est:
-                print(f"{commit}: tpcds replay budget spent: giant stays", file=sys.stderr)
+            if spent + est > REPLAY_EST_BUDGET_S:
+                print(f"{commit}: tpcds replay estimate budget spent: giant stays", file=sys.stderr)
                 continue
+            left_wall = REPLAY_EMERGENCY_WALL_S - (time.monotonic() - wall0)
+            if left_wall < 5:
+                print(f"{commit}: tpcds replay emergency wall stop: giant stays", file=sys.stderr)
+                continue
+            spent += est
             seed = zlib.crc32(commit.encode()) % 8
             c0, w0 = base_cpu(), time.monotonic()
             ok, why = _run_replay(sc.plan, patched, src_root, min(REPLAY_PER_COMMIT_S, left_wall), seed)

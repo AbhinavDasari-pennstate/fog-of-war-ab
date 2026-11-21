@@ -129,32 +129,51 @@ def ast_diff(old, new, ranges):
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
-def bind_sig(node) -> frozenset:
-    """Everything a function (and what it contains) can bind, plus yield and await. Making a name
-    local anywhere in a function changes every read of it there (UnboundLocalError); a yield turns
-    the function into a generator. Neither is local to the line that holds it."""
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.ListComp, ast.SetComp,
+           ast.DictComp, ast.GeneratorExp)
+
+
+def bind_sig(node):
+    """What each scope of a function binds: (names, (the same for every nested scope in order)).
+    Names are stores and deletes, imports, def and class names, handler and match names, parameters,
+    global and nonlocal declarations, and yield or await. Making a name local anywhere in a scope
+    changes every read of it there (UnboundLocalError); a yield turns the function into a generator.
+    Neither is local to the line that holds it. Scopes are kept apart: a name that moves from the
+    outer function into a nested one changes both signatures."""
     names = set()
-    for n in ast.walk(node):
+    kids = []
+
+    def record(n):
         if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
             names.add(n.id)
         elif isinstance(n, (ast.Global, ast.Nonlocal)):
             names.update(type(n).__name__ + ":" + x for x in n.names)
         elif isinstance(n, (ast.Import, ast.ImportFrom)):
             names.update((a.asname or a.name).split(".")[0] for a in n.names)
-        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(n.name)
         elif isinstance(n, ast.ExceptHandler) and n.name:
             names.add(n.name)
         elif isinstance(n, ast.arg):
             names.add(n.arg)
         elif isinstance(n, (ast.Yield, ast.YieldFrom, ast.Await)):
             names.add("<" + type(n).__name__ + ">")
-        else:
+        elif type(n).__name__.startswith("Match"):
             for attr in ("name", "rest"):
                 v = getattr(n, attr, None)
-                if isinstance(v, str) and type(n).__name__.startswith("Match"):
+                if isinstance(v, str):
                     names.add(v)
-    return frozenset(names)
+
+    def visit(n):
+        for ch in ast.iter_child_nodes(n):
+            if isinstance(ch, _SCOPES):
+                if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    names.add(ch.name)
+                kids.append(bind_sig(ch))
+            else:
+                record(ch)
+                visit(ch)
+
+    visit(node)
+    return (frozenset(names), tuple(kids))
 
 
 def units(tree):
