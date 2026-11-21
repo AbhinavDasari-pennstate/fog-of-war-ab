@@ -73,3 +73,16 @@ def test_probe_selection_contains_every_real_failure(env, name):
     ids = {t["number"]: t["id"] for t in tests}
     lost = [ids[n] for n in map(lambda i: next(t["number"] for t in tests if t["id"] == i), failing) if n not in got]
     assert not lost, lost
+
+
+def test_enum_member_value_flows_to_every_dialect_that_names_it(env):
+    """Stress-style trap: UPPERCASE is read only through class bodies (NORMALIZATION_STRATEGY =
+    NormalizationStrategy.UPPERCASE) executed at import, never by a line a test runs."""
+    maps, tests, diffparse, rules = env
+    rel = "sqlglot/dialects/dialect.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace("    UPPERCASE = auto()", "    UPPERCASE = None", 1)
+    assert new != old
+    got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    snow = [t["number"] for t in tests if "test_snowflake" in t["id"]]
+    assert snow and set(snow) <= got
