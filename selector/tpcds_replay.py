@@ -3,9 +3,8 @@
 Run as a child process (python -S -E tpcds_replay.py), job as JSON on stdin:
     {"src": pinned tree, "patched": {relpath: new text}, "plan": {"<q>": "OE"}, "map": path to tpcds.z,
      "per_query_s": float}
-Optional job fields for the later seeds of one plan: "memo" {"<q>": [O digests]} (optimized trees an earlier
-seed already ran through the executor and found right; the answer is also printed as "memo") and "lazy"
-(the tables are loaded only by a query that really needs the executor).
+Optional job field for the later seeds of one plan: "memo" {"<q>": [O digests]} (optimized trees an earlier
+seed already ran through the executor and found right; the answer is also printed as "memo").
 Prints one JSON line {"same": bool, "why": str, "ran": n, "memo": {...}}. `same` is True only when every replayed
 query gave, at every stage it ran, a digest the pristine build had recorded. Any difference, error,
 timeout or crash is same=False.
@@ -79,17 +78,19 @@ def _limit(e, job):
 
 
 class _LazyTables(dict):
-    """Tables read from the fixtures on first use. The load happens in the forked query child, so the warm
-    parent never holds a table it did not need."""
+    """The tables of a plan that leaves the executor alone. Nothing is read until a query needs the executor
+    (its optimized tree is one nobody has judged); then all of them are read once, in the warm parent, and every
+    later query runs as it always did."""
 
-    def __init__(self, src, schema):
+    def __init__(self, src, schema, names):
         super().__init__()
-        self._src, self._schema = src, schema
+        self._src, self._schema, self._names = src, schema, sorted(names)
+        self.loaded = False
 
-    def __missing__(self, name):
-        t = core.load_table(self._src, name, self._schema[name])
-        self[name] = t
-        return t
+    def load_all(self):
+        for n in self._names:
+            self[n] = core.load_table(self._src, n, self._schema[n])
+        self.loaded = True
 
 
 def _judge(q, e, meta, sql, schema, tables, want, job, memo=()):
@@ -109,8 +110,9 @@ def _judge(q, e, meta, sql, schema, tables, want, job, memo=()):
         ex = dict(e)
         ex["O"] = list(e["O"]) + list(seen)
     lazy = isinstance(tables, _LazyTables)
-    out = _fork_run(q, sql, meta, schema, tables, want, _limit(e, job), ex, probe=lazy and exec_same)
+    out = _fork_run(q, sql, meta, schema, tables, want, _limit(e, job), ex, probe=lazy and not tables.loaded)
     if out.get("need_full"):
+        tables.load_all()
         out = _fork_run(q, sql, meta, schema, tables, want, _limit(e, job), e)
         seen = ()
     if "error" in out:
@@ -161,8 +163,10 @@ def main():
             if set(st) & set("BOE"):
                 need.update(tp["queries"][str(q)]["tables"])
         memo_in = job.get("memo")
-        if job.get("lazy") and memo_in is not None:
-            tables = _LazyTables(src, schema)
+        # a plan that leaves the executor alone can stop before it, so it reads no table until a query needs the
+        # executor; a plan with B or E reads what it needs once, up front
+        if all(not (set(st) & set("BE")) for st in plan.values()):
+            tables = _LazyTables(src, schema, need)
         else:
             tables = {t: core.load_table(src, t, schema[t]) for t in sorted(need)}
         order = sorted(plan, key=lambda q: tp["queries"][str(q)]["cpu"])

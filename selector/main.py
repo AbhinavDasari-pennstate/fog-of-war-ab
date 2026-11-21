@@ -196,7 +196,6 @@ def _run_replay_ex(plan, patched, src_root: Path, timeout: float, seed: int, mem
            "map": str(MAPS_ROOT / "tpcds.z")}
     if memo is not None:
         job["memo"] = memo
-        job["lazy"] = True
     env = {"PYTHONHASHSEED": str(seed), "PYTHONDONTWRITEBYTECODE": "1", "HOME": "/tmp"}
     try:
         r = subprocess.run([sys.executable, "-S", str(Path(__file__).resolve().parent / "tpcds_replay.py")],
