@@ -85,7 +85,7 @@ ok "eval --docker agrees with make sample: $SIMD"
 # 7. fresh clone of HEAD builds and scores the same
 git clone -q "$ROOT" "$TMPD/clone" || fail "git clone of HEAD"
 docker build -q --platform linux/amd64 --tag "${IMAGE}-fresh" "$TMPD/clone" > "$TMPD/fresh.log" 2>&1 || fail "fresh clone docker build" "$(tail -15 "$TMPD/fresh.log")"
-make -s -C "$ROOT" sample SAMPLE="$SAMPLE" IMAGE="${IMAGE}-fresh" > "$TMPD/fresh_sample.log" 2>&1 || fail "fresh clone sample run" "$(cat "$TMPD/fresh_sample.log")"
+make -s -C "$TMPD/clone" sample SAMPLE="$SAMPLE" IMAGE="${IMAGE}-fresh" > "$TMPD/fresh_sample.log" 2>&1 || fail "fresh clone sample run" "$(cat "$TMPD/fresh_sample.log")"
 FRESH=$(grep '^Simulated' "$TMPD/fresh_sample.log")
 [ "$FRESH" = "$FIRST" ] || fail "fresh clone scores differently ($FRESH vs $FIRST)"
 ok "fresh clone of HEAD builds and scores the same: $FRESH"

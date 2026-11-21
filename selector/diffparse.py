@@ -66,6 +66,8 @@ def parse(patch_text: str) -> list[FileChange]:
                 hunk.lines.append((line[0], line[1:]))
                 continue
             hunk = None
+        if line[:1] in (" ", "-", "+") and not (line.startswith(("--- ", "+++ ")) and cur and not cur.hunks):
+            raise PatchError("diff line outside a hunk")
         m = _HEADER.match(line)
         if m:
             cur = FileChange(_strip_prefix(m.group(1)), _strip_prefix(m.group(2)), "modified")

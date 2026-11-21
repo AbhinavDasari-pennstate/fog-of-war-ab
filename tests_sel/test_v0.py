@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 import main as selector_main
-from conftest import FIXTURES, PIN, make_patch, tiny_tests
+from conftest import FIXTURES, PIN, make_patch, needs_pin, tiny_tests
 
 TESTS = tiny_tests(40)
 ALL = {t["number"] for t in TESTS}
@@ -32,16 +32,19 @@ def assert_full(workers):
     assert 1 <= len([w for w in workers if w]) <= 8
 
 
+@needs_pin
 def test_real_comment_patch_is_empty():
     patch = (FIXTURES / "9u5k.patch").read_text()
     assert selector_main.decide(patch, PIN, TESTS) == []
 
 
+@needs_pin
 def test_real_code_patch_runs_every_test_once():
     patch = (FIXTURES / "5y72.patch").read_text()
     assert_full(selector_main.decide(patch, PIN, TESTS))
 
 
+@needs_pin
 def test_real_fixture_patch_runs_everything():
     patch = (FIXTURES / "2vdj.patch").read_text()
     assert_full(selector_main.decide(patch, PIN, TESTS))
@@ -144,3 +147,60 @@ def test_main_prints_only_answer_lines(tmp_path, capsys):
     assert lines[0]["workers"] == []
     assert sorted(flat(lines[1]["workers"])) == sorted(ALL)
     assert err.strip() != ""
+
+
+def _run_main(tmp_path, capsys, patches: dict[str, bytes]):
+    data = tmp_path / "data"
+    (data / "commits").mkdir(parents=True)
+    (data / "tests.json").write_text(json.dumps({"tests": TESTS}))
+    src = make_src(tmp_path / "src", {"sqlglot/a.py": OLD, "sqlglot/parser.py": "x = 1\n# c\ny = 2\n"})
+    for name, body in patches.items():
+        (data / "commits" / f"{name}.patch").write_bytes(body)
+    selector_main.main(data, src)
+    out, _ = capsys.readouterr()
+    return [json.loads(l) for l in out.splitlines()]
+
+
+def test_non_utf8_patch_still_gives_one_valid_line_per_commit(tmp_path, capsys):
+    bad = make_patch("sqlglot/a.py", OLD, "# caf\xe9\n" + OLD).encode("latin-1")
+    good = make_patch("sqlglot/a.py", OLD, "# c\n" + OLD).encode()
+    lines = _run_main(tmp_path, capsys, {"aaaa": bad, "bbbb": good})
+    assert [l["commit"] for l in lines] == ["aaaa", "bbbb"]
+    assert sorted(flat(lines[0]["workers"])) == sorted(ALL)
+    assert lines[1]["workers"] == []
+
+
+def test_exception_in_one_commit_still_prints_a_full_line(tmp_path, capsys, monkeypatch):
+    real = selector_main.decide
+
+    def boom(text, src, tests):
+        if "boom" in text:
+            raise RuntimeError("boom")
+        return real(text, src, tests)
+
+    monkeypatch.setattr(selector_main, "decide", boom)
+    p = make_patch("sqlglot/a.py", OLD, "# boom\n" + OLD).encode()
+    q = make_patch("sqlglot/a.py", OLD, "# c\n" + OLD).encode()
+    lines = _run_main(tmp_path, capsys, {"aaaa": p, "bbbb": q})
+    assert sorted(flat(lines[0]["workers"])) == sorted(ALL)
+    assert lines[1]["workers"] == []
+
+
+def test_lone_cr_in_added_line_is_not_empty(tmp_path, capsys):
+    patch = (
+        "diff --git a/sqlglot/parser.py b/sqlglot/parser.py\nindex 1..2 100644\n"
+        "--- a/sqlglot/parser.py\n+++ b/sqlglot/parser.py\n@@ -1,3 +1,3 @@\n x = 1\n"
+        "-# c\n+# c\rraise_now()\n y = 2\n"
+    ).encode()
+    lines = _run_main(tmp_path, capsys, {"aaaa": patch})
+    assert sorted(flat(lines[0]["workers"])) == sorted(ALL)
+
+
+def test_stray_lines_after_a_complete_hunk_are_rejected():
+    import diffparse
+    patch = (
+        "diff --git a/sqlglot/a.py b/sqlglot/a.py\n--- a/sqlglot/a.py\n+++ b/sqlglot/a.py\n"
+        "@@ -1,1 +1,1 @@\n-x\n+y\n+raise_now()\n"
+    )
+    with pytest.raises(diffparse.PatchError):
+        diffparse.parse(patch)

@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 import eval as ev
-from conftest import ROOT
+from conftest import ROOT, needs_kit, needs_pin
 
 KIT = ROOT.parent / "kits" / "rwx" / "x"
 SAMPLE = KIT / "sample"
@@ -27,6 +27,7 @@ def load():
     return ev.load_set("sample", sample_dir=SAMPLE)
 
 
+@needs_kit
 def test_kit_baseline_scores_exactly_what_score_py_prints():
     ds = load()
     res = ev.score(BASELINE_OUT.read_bytes(), ds)
@@ -35,6 +36,7 @@ def test_kit_baseline_scores_exactly_what_score_py_prints():
     assert res["misses"] == []
 
 
+@needs_kit
 def test_dropping_one_failing_test_reports_that_miss(tmp_path):
     ds = load()
     lines = [json.loads(l) for l in BASELINE_OUT.read_text().splitlines()]
@@ -49,12 +51,14 @@ def test_dropping_one_failing_test_reports_that_miss(tmp_path):
     assert res["simulated_ms"] == kit_score_ms(out)
 
 
+@needs_kit
 def test_rejected_output_is_reported_not_raised():
     ds = load()
     res = ev.score(b"not json\n", ds)
     assert not res["ok"] and res["code"] == "not_json"
 
 
+@needs_kit
 def test_floor_is_optimal_packing_of_the_true_failing_sets():
     ds = load()
     floor = ev.floor_ms(ds)
@@ -63,6 +67,7 @@ def test_floor_is_optimal_packing_of_the_true_failing_sets():
     assert floor["2haz"] == 0  # breaks nothing
 
 
+@needs_kit
 def test_report_has_per_kind_table_and_floor():
     ds = load()
     res = ev.score(BASELINE_OUT.read_bytes(), ds)
@@ -73,6 +78,8 @@ def test_report_has_per_kind_table_and_floor():
     assert "1210.470" in text
 
 
+@needs_kit
+@needs_pin
 def test_native_run_of_the_selector_matches_its_own_score(tmp_path):
     ds = load()
     stdout, stderr, cpu = ev.run_native(ds, ROOT / "selector" / "main.py", src=ROOT.parent / "sqlglot-pin")

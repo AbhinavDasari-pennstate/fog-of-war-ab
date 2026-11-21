@@ -43,7 +43,9 @@ def _is_noop(change: "diffparse.FileChange", src_root: Path) -> tuple[bool, str]
         return False, f"{path}: not python"
     if path.startswith(SOURCE_READERS):
         return False, f"{path}: source read by tests"
-    old = (src_root / path).read_text(encoding="utf-8")
+    if any("\r" in text for h in change.hunks for _, text in h.lines):
+        return False, f"{path}: carriage return in a changed hunk"
+    old = (src_root / path).read_bytes().decode("utf-8")
     new = diffparse.apply(old, change)
     if _cookie(old) != _cookie(new):
         return False, f"{path}: encoding declaration changed"
@@ -53,27 +55,42 @@ def _is_noop(change: "diffparse.FileChange", src_root: Path) -> tuple[bool, str]
     return same, f"{path}: ast {'identical' if same else 'changed'}"
 
 
+_FULL: dict[int, list[list[int]]] = {}
+
+
+def _full(tests: list[dict]) -> list[list[int]]:
+    """Every test packed; computed once per tests list."""
+    durations = {t["number"]: round(t["seconds"] * 1000 + 1e-9) for t in tests}
+    key = hash(tuple(durations.items()))
+    if key not in _FULL:
+        _FULL[key] = pack.pack(durations)
+    return [list(w) for w in _FULL[key]]
+
+
 def decide(patch_text: str, src_root: Path, tests: list[dict]) -> list[list[int]]:
     """Workers for one commit."""
-    everything = {t["number"]: round(t["seconds"] * 1000 + 1e-9) for t in tests}
     try:
         changes = diffparse.parse(patch_text)
         for change in changes:
             ok, why = _is_noop(change, src_root)
             print(f"  {why}", file=sys.stderr)
             if not ok:
-                return pack.pack(everything)
+                return _full(tests)
         return []
     except Exception as exc:  # any doubt means the widest answer
         print(f"  fallback to all tests: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return pack.pack(everything)
+        return _full(tests)
 
 
 def main(data: Path = DATA, src_root: Path = SRC) -> None:
     tests = json.loads((data / "tests.json").read_text(encoding="utf-8"))["tests"]
     for patch in sorted((data / "commits").glob("*.patch")):
         print(f"{patch.stem}:", file=sys.stderr)
-        workers = decide(patch.read_text(encoding="utf-8"), src_root, tests)
+        try:
+            workers = decide(patch.read_bytes().decode("utf-8"), src_root, tests)
+        except Exception as exc:  # one full-suite line per commit, whatever happens
+            print(f"  fallback to all tests: {type(exc).__name__}: {exc}", file=sys.stderr)
+            workers = _full(tests)
         print(json.dumps({"commit": patch.stem, "workers": workers}))
     print(f"v0 done: {len(tests)} tests known", file=sys.stderr)
 
