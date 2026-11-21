@@ -66,7 +66,7 @@ def test_docstring_only_edit_adds_no_import_time_tests(env):
 def test_imptime_skips_the_edited_module_and_reads_the_class_map(env):
     maps, tests, diffparse, rules = env
     ctx = rules.Ctx(maps, tests, PIN)
-    files, classes, ranges, state = maps.impexec
+    files, classes, ranges, state, base = maps.impexec
     assert state == "ok"
     assert "sqlglot/generators/duckdb.py" in classes["Tokenizer"] or "sqlglot/generators/duckdb.py" in files["sqlglot/tokens.py"]
     with_self = ctx.imptime("sqlglot/dialects/bigquery.py", "")
@@ -77,7 +77,7 @@ def test_damaged_map_widens_to_every_test(env):
     maps, tests, diffparse, rules = env
 
     class Damaged:
-        impexec = ({}, {}, {}, "bad")
+        impexec = ({}, {}, {}, "bad", frozenset())
 
     ctx = rules.Ctx(maps, tests, PIN)
     ctx.m = Damaged()
@@ -115,3 +115,16 @@ def test_string_constant_inside_a_call_in_a_class_body_widens_to_the_importers(e
     got, _ = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
     imp = maps.imports[rel]
     assert len(got) >= len([n for n in range(len(tests)) if (imp >> n) & 1])
+
+
+def test_zero_month_in_a_date_call_at_module_scope_selects_every_importer(env):
+    """Reviewer H1: parsers/tsql.py DEFAULT_START_DATE = datetime.date(1900, 1, 1) -> (1900, 0, 1) raises ValueError at import; a number
+    inside a call is not a harmless constant. test_get_or_raise and the lazy test import the tsql dialect."""
+    got, _, ids = _select(env, "sqlglot/parsers/tsql.py", 54, "datetime.date(1900, 1, 1)", "datetime.date(1900, 0, 1)")
+    for want in (LAZY, "tests/dialects/test_dialect.py::TestDialect::test_get_or_raise", "tests/dialects/test_dialect.py::TestDialect::test_enum"):
+        assert ids[want] in got, want
+
+
+def test_class_edit_in_a_module_that_import_sqlglot_loads_selects_test_lazy_load(env):
+    got, _, ids = _select(env, "sqlglot/tokens.py", 392, "TokenType.SELECT", "TokenType.SET")
+    assert ids["tests/dialects/test_dialect.py::TestDialect::test_lazy_load"] in got

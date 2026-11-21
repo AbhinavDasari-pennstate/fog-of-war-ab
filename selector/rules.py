@@ -90,7 +90,7 @@ class Ctx:
         soft: (first, last) line of the lambda the edit sits in: only that lambda's code can run. Otherwise a class-level edit is
         reached by the methods of the class (or of a subclass) that ran, a module-level one by the functions of the file that ran.
         The module being edited is left out: a change of what its own body does is the business of the class and name maps."""
-        files, classes, ranges, state = self.m.impexec
+        files, classes, ranges, state, base = self.m.impexec
         if state == "absent" or self.doc_only:
             return 0
         if state == "bad":
@@ -106,6 +106,10 @@ class Ctx:
             mods.update(files.get(path, ()))
         mods.discard(path)
         out = 0
+        if path in base:  # `import sqlglot` loads this module: test_lazy_load (a subprocess) runs it for real
+            for t in self.tests:
+                if t["id"].endswith("test_dialect.py::TestDialect::test_lazy_load"):
+                    out |= 1 << t["number"]
         for f in mods:
             out |= self.m.imports.get(f, self.all) | self.m.srcreaders.get(f, 0)
         return out
@@ -227,18 +231,32 @@ def _counterpart(tree, path):
     return node
 
 
-class _Blank(ast.NodeTransformer):
-    def visit_Constant(self, node):
-        if isinstance(node.value, (str, bytes)):
-            return node
-        return ast.copy_location(ast.Constant(value=0), node)
+_PLAIN = (ast.Dict, ast.List, ast.Tuple, ast.Set, ast.Assign, ast.AnnAssign, ast.Starred, ast.UnaryOp, ast.USub, ast.UAdd)
+
+
+def _blank(node, plain=True):
+    """Dump of `node` with bool and None constants blanked everywhere, and numbers blanked only where every ancestor is plain data
+    (a dict, list, tuple or set display, an assignment). A number that is a call argument, a subscript, an operand of arithmetic or a
+    condition can make the import raise (datetime.date(1900, 0, 1))."""
+    if isinstance(node, ast.Constant):
+        v = node.value
+        if v is None or isinstance(v, bool) or (plain and isinstance(v, (int, float, complex))):
+            return "C"
+        return repr(v)
+    if isinstance(node, ast.AST):
+        here = plain and isinstance(node, _PLAIN + (ast.Module, ast.ClassDef, ast.Load, ast.Store, ast.keyword)) and not isinstance(node, ast.keyword)
+        parts = []
+        for f in node._fields:
+            parts.append(f + "=" + _blank(getattr(node, f, None), here))
+        return type(node).__name__ + "(" + ",".join(parts) + ")"
+    if isinstance(node, list):
+        return "[" + ",".join(_blank(x, plain) for x in node) + "]"
+    return repr(node)
 
 
 def _same_but_numbers(a, b) -> bool:
-    """The two statements agree except for bool, number and None constants (strings, names and calls are equal)."""
-    import copy
-
-    return ast.dump(_Blank().visit(copy.deepcopy(a))) == ast.dump(_Blank().visit(copy.deepcopy(b)))
+    """The two statements agree except for bool and None constants anywhere, and number constants in plain data."""
+    return _blank(a) == _blank(b)
 
 
 def _own_import_risk(old_tree, new_tree, old_text: str, diffs, ranges) -> bool:

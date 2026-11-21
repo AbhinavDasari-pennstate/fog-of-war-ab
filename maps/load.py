@@ -102,13 +102,13 @@ class Maps:
         imports at all; the tests that import the module (self.imports, lazy imports included) are the ones it can fail."""
         w = getattr(self, "_impexec", None)
         if w is None:
-            w = ({}, {}, {}, "absent")
+            w = ({}, {}, {}, "absent", frozenset())
             try:
                 if os.path.exists(os.path.join(self.dir, "impexec.bin")):
                     d = _read(self.dir, "impexec.bin")
-                    w = (d["file"], d["class"], d["range"], "ok")
+                    w = (d["file"], d["class"], d["range"], "ok", frozenset(d.get("base", ())))
             except Exception:
-                w = ({}, {}, {}, "bad")
+                w = ({}, {}, {}, "bad", frozenset())
             self._impexec = w
         return w
 

@@ -42,7 +42,7 @@ def test_plain_constant_selects_its_readers_and_not_tpcds(env):
     assert "L2" in why
     assert num["tests/dialects/test_mysql.py::TestMySQL::test_safe_div"] in got
     assert num[TPCDS] not in got
-    assert len(got) < 60
+    assert len(got) < 200  # T28: the dialect metaclass hook at class creation credits subclasses' modules (60 before)
 
 
 @pytest.mark.parametrize("rel,old_s,new_s", [

@@ -32,6 +32,7 @@ import sys
 import zlib
 
 CO_OPTIMIZED = 0x1
+META = not os.environ.get("IMPEXEC_NO_META")  # IMPEXEC_NO_META=1: do not credit metaclass __new__ hooks to the classes being built (narrower, less sound)
 
 
 def main() -> int:
@@ -78,11 +79,21 @@ def main() -> int:
                 byrange.setdefault(r, {}).setdefault(key, set()).add(m)
                 if code.co_argcount:
                     try:
-                        o = frame.f_locals.get(code.co_varnames[0])
+                        loc = frame.f_locals
+                        o = loc.get(code.co_varnames[0])
                         k = o if isinstance(o, type) else type(o)
                         for c in k.__mro__:
                             if getattr(c, "__module__", "").startswith("sqlglot"):
                                 byclass.setdefault(c.__qualname__, set()).add(m)
+                        if META and code.co_name == "__new__" and isinstance(o, type) and issubclass(o, type):
+                            # a metaclass hook: the class being built (its name, and the MRO of its bases) is what it reads
+                            for b in loc.get(code.co_varnames[2], ()) if code.co_argcount > 2 else ():
+                                for c in getattr(b, "__mro__", ()):
+                                    if getattr(c, "__module__", "").startswith("sqlglot"):
+                                        byclass.setdefault(c.__qualname__, set()).add(m)
+                            nm = loc.get(code.co_varnames[1]) if code.co_argcount > 1 else None
+                            if isinstance(nm, str):
+                                byclass.setdefault(nm, set()).add(m)
                     except Exception:
                         pass
         elif event == "return":
@@ -92,6 +103,8 @@ def main() -> int:
     sys.setprofile(prof)
     try:
         import sqlglot  # noqa: F401
+
+        base = sorted(rel(getattr(mm, "__file__", "") or "") for mm in list(sys.modules.values()) if rel(getattr(mm, "__file__", "") or ""))
 
         for mod in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
             if mod.name.rsplit(".", 1)[-1] == "__main__":
@@ -118,6 +131,7 @@ def main() -> int:
     out = {
         "file": {k: sorted(v) for k, v in sorted(byfile.items())},
         "class": {k: sorted(v) for k, v in sorted(byclass.items())},
+        "base": base,
         "range": {f: sorted((lo, hi, sorted(v)) for (lo, hi), v in d.items()) for f, d in sorted(byrange.items())},
     }
     with open(a.out, "wb") as f:
