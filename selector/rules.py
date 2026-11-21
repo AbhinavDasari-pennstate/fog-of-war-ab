@@ -68,6 +68,7 @@ class Ctx:
         self.notes: list[str] = []
         self.single = False  # the patch changes one file
         self.narrow = None  # (start line, mask) of a class-level assignment narrowed by maps/attrreads.bin
+        self.old_tree = None  # the parsed old text of the file under edit (the AST proof of _import_only)
         self._attr = None
         self._val = None
         self.patched = None  # {relpath: new text} of every modified sqlglot module of the patch (set by select), for the import probe
@@ -391,6 +392,47 @@ def _is_enum(old_lines, start: int, cls: str) -> bool:
     return False
 
 
+# The parts of an eagerly evaluated literal or expression: every sub-expression runs when the statement runs.
+# Not here: Lambda, a comprehension or generator (run later or per item), IfExp, BoolOp and Compare (short circuit),
+# NamedExpr, Await, Yield: a line of those may legitimately have no record because it was never reached.
+_EAGER = (ast.Constant, ast.Name, ast.Attribute, ast.Tuple, ast.List, ast.Set, ast.Dict, ast.Starred, ast.UnaryOp,
+          ast.BinOp, ast.JoinedStr, ast.FormattedValue, ast.Call, ast.keyword, ast.Subscript, ast.Slice,
+          ast.operator, ast.unaryop, ast.expr_context)
+
+
+def _eager_stmt(tree, start: int, end: int) -> bool:
+    """P1 proof: lines start..end are exactly one simple statement (Assign, AnnAssign or Expr) and everything in it
+    is evaluated when it runs, so a line of it without a coverage record is an interior line of a statement that
+    ran, not code that was skipped."""
+    hits = []
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        for ch in ast.iter_child_nodes(node):
+            if isinstance(ch, ast.stmt):
+                if ch.lineno > end or ch.end_lineno < start:
+                    continue
+                if ch.lineno == start and ch.end_lineno == end:
+                    hits.append(ch)
+            stack.append(ch)
+    if len(hits) != 1 or not isinstance(hits[0], (ast.Assign, ast.AnnAssign, ast.Expr)):
+        return False
+    return all(n is hits[0] or isinstance(n, _EAGER) for n in ast.walk(hits[0]))
+
+
+def _import_only(ctx: Ctx, path: str, start: int, end: int, il, lm) -> bool:
+    """L2 shortcut: the statement on start..end only ran at import (who ran it lazily is not who depends on it).
+    True when every line was marked import-time, as before; or, new (P1), when every line with a record is
+    import-time, at least one is, and the AST shows the lines without a record are interior lines of one eagerly
+    evaluated statement (a 264-line set literal has one recorded line). Anything else keeps today's rule."""
+    span = range(start, end + 1)
+    if all(l in il for l in span):
+        return True
+    if not any(l in il for l in span) or any(l in lm and l not in il for l in span):
+        return False
+    return ctx.old_tree is not None and _eager_stmt(ctx.old_tree, start, end)
+
+
 def _class_level(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed_texts=(), added_texts=(), soft=False) -> int:
     return _class_level_core(ctx, path, s, ln, texts, old_lines, removed_texts, added_texts, soft) | ctx.imptime(path, s[5], soft)
 
@@ -421,7 +463,7 @@ def _class_level_core(ctx: Ctx, path: str, s, ln: int, texts, old_lines, removed
     if start < end and sid and ln not in il and ln not in un:
         return sets[sid]
     nr = ctx.narrow
-    if nr is not None and nr[0] == start and all(l in il for l in range(start, end + 1)):
+    if nr is not None and nr[0] == start and _import_only(ctx, path, start, end, il, lm):
         out = 0  # L2: a statement that only runs at import: who ran it lazily is not who depends on it
     else:
         out = m.stmt_mask(path, ln)
@@ -687,6 +729,7 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return ctx.wide(path) | sr, f"R3 {path}: does not parse"
     old_tree = pyscope.parse(old_text, path)
+    ctx.old_tree = old_tree
     ranges = []
     for removed, added, p in _blocks(change):
         ranges += [(ln, ln) for ln, _ in removed]
