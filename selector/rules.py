@@ -20,6 +20,7 @@ import weakmut
 
 DEFAULT_SRC = os.environ.get("BR_SRC", "/app/sqlglot-src")
 FIXTURE_ROOT = "tests/fixtures"
+TPCDS_FIXTURE = "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql"
 # Words that name no class-level definition; looking them up would only widen.
 _TARGET = re.compile(r"^\s*([A-Za-z_][A-Za-z_0-9]*)\s*(?::[^=]*)?=(?!=)")
 STOP = frozenset({"True", "False", "None", "self", "cls", "lambda", "not", "and", "or", "in", "is",
@@ -313,6 +314,18 @@ def _data_file(ctx: Ctx, path: str, change) -> tuple[int, str]:
         if all(_comment_or_blank(t) for t in texts):
             return 0, f"R2 {path}: only comment or blank lines (dropped by _filter_comments)"
     out = _reads(ctx, path)
+    if path == TPCDS_FIXTURE and change is not None and change.status == "modified" and change.path_old == path:
+        # tests/test_executor.py reads this file only in setUpClass (`cls.tpcds_sqls = list(load_sql_fixture_pairs(...))`)
+        # and then uses the SQL of each pair; the third part (the optimized text) is bound to `_` and never looked at, and
+        # test_optimizer's test_tpcds is the only other reader. When the (meta, sql) list the helper builds from the patched
+        # text equals the pristine one (and building it does not raise), no test of that file can see the edit.
+        try:
+            import tpcds_scope
+
+            if tpcds_scope._fixture_same(change, ctx.src):
+                return out & ~ctx.by_file.get("tests/test_executor.py", 0), f"R2 {path}: the (meta, sql) pairs test_executor.py reads are unchanged"
+        except Exception:
+            pass
     if path.startswith(FIXTURE_ROOT + "/") and path not in m.reads:
         for k, v in m.reads.items():  # unknown fixture: everything that reads fixtures
             if k.startswith(FIXTURE_ROOT) and not k.endswith(".gz"):

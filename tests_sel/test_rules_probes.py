@@ -228,3 +228,29 @@ def test_default_edit_plus_a_body_edit_is_not_narrowed(env):
     assert new != old
     _, why = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
     assert "literal default values only" not in why
+
+
+def test_tpcds_fixture_edit_that_keeps_the_pairs_spares_test_executor(env):
+    """T25: tests/test_executor.py reads tpc-ds.sql in setUpClass and uses only the (meta, sql) of each pair. An edit
+    that leaves that list as it was cannot be seen by any test of the file (tpch giants included); the optimizer's
+    test_tpcds, which compares the optimized text, still runs."""
+    maps, tests, diffparse, rules = env
+    patch = (Path(__file__).resolve().parent / "fixtures" / "tpcds_expected_text.patch").read_text()
+    got, why = rules.select(diffparse.parse(patch), maps, tests, src_root=PIN)
+    ids = {t["number"]: t["id"] for t in tests}
+    names = {ids[n] for n in got}
+    assert "pairs test_executor.py reads are unchanged" in why
+    assert not [i for i in names if i.startswith("tests/test_executor.py::")], names
+    assert "tests/test_optimizer.py::TestOptimizer::test_tpcds" in names
+
+
+def test_tpcds_fixture_edit_that_changes_a_query_keeps_test_executor(env):
+    maps, tests, diffparse, rules = env
+    rel = "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql"
+    old = (PIN / rel).read_text("utf-8")
+    first = old.index("SELECT")
+    new = old[:first] + "SELECT 1 + " + old[first + len("SELECT "):]
+    got, why = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    ids = {t["number"]: t["id"] for t in tests}
+    assert "unchanged" not in why
+    assert {i for n in got if (i := ids[n]).startswith("tests/test_executor.py::")}

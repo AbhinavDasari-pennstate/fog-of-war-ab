@@ -1,0 +1,13 @@
+diff --git a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+index ea2df29..f5b677d 100644
+--- a/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
++++ b/tests/fixtures/optimizer/tpc-ds/tpc-ds.sql
+@@ -12450,7 +12450,7 @@ WITH "tmp1" AS (
+       "item"."i_class" IN ('mens', 'pendants', 'swimwear')
+       OR "item"."i_class" IN ('paint', 'accessories', 'fitness')
+     )
+-  GROUP BY
++   BY
+     "item"."i_category",
+     "item"."i_class",
+     "item"."i_brand",
