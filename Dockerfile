@@ -13,5 +13,5 @@ RUN python -m compileall -q /app/selector /app/maps /app/sqlglot-src && chmod -R
 # compile ast, json, threading and more from source again (about 50 ms of CPU, charged to the score).
 RUN python -m compileall -q -x 'site-packages|idlelib|tkinter|turtledemo|ensurepip|lib2to3' /usr/local/lib/python3.13 || true
 
-ENV PYTHONDONTWRITEBYTECODE=1 BR_PROBE=O
+ENV PYTHONDONTWRITEBYTECODE=1 BR_PROBE=F
 CMD ["python", "-S", "-E", "/app/selector/main.py"]
