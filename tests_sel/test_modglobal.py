@@ -120,6 +120,24 @@ def test_another_binding_or_a_dynamic_reach_keeps_the_older_rule(extra):
     _none(SRC + extra)
 
 
+def test_a_dunder_name_keeps_the_older_rule():
+    # `from m import *` reads __all__ without spelling it anywhere; the same goes for __doc__ and doctest
+    src = '__all__ = ["a", "b"]\na = b = 1\n\n\ndef names():\n    return __all__\n'
+    assert find(src, src.replace('"b"]', '"c"]')) is None
+    ok = src.replace("__all__", "EXPORTS")
+    assert find(ok, ok.replace('"b"]', '"c"]')) == ("EXPORTS", [6])
+
+
+@pytest.mark.parametrize("extra", [
+    "\n\ndef h(f):\n    return f.__globals__\n",
+    "\n\ndef h(fr):\n    return fr.f_globals\n",
+    "\nimport sys\n\n\ndef h():\n    return sys._getframe()\n",
+    "\nimport inspect\n\n\ndef h():\n    return inspect.currentframe()\n",
+])
+def test_a_frame_or_function_namespace_reach_keeps_the_older_rule(extra):
+    _none(SRC + extra)
+
+
 def test_a_literal_nobody_reads_keeps_the_older_rule():
     src = 'UNITS = ("YEAR",)\n\n\ndef f():\n    return 1\n'
     _none(src)
@@ -181,6 +199,9 @@ def test_a_file_with_its_own_binding_of_the_same_name_is_harmless(tmp_path):
     "def f(u):\n    return u in UNITS\n",                               # spelled, not bound here: whose is it?
     'from sqlglot.other import *\nUNITS = ("x",)\n',                    # a star import can rebind it
     'UNITS = ("x",)\n\n\ndef f(m):\n    return m.UNITS\n',              # own binding, but also an attribute read
+    'UNITS = ("x",)\n\n\ndef f(m):\n    return getattr(m, "UNITS")\n',  # own binding, but also the name in a string
+    'UNITS = ("x",)\n\n\ndef f():\n    global UNITS\n',                 # own binding, but also a global statement
+    'UNITS = ("x",)\nfrom sqlglot.thing import UNITS\n',                # own binding, then the import wins
     "# UNITS\n",                                                        # only a comment: no own binding, no proof
 ])
 def test_a_file_that_may_reach_the_name_keeps_the_older_rule(tmp_path, text):
@@ -197,7 +218,7 @@ def test_doubt_keeps_the_older_rule(tmp_path):
     root = _tree(tmp_path, {"sqlglot/broken.py": "UNITS = (\n"})          # does not parse
     assert modglobal.reached_elsewhere(root, PATH, "UNITS") is True
     assert modglobal.reached_elsewhere(tmp_path / "nowhere", PATH, "UNITS") is True  # the edited file was never seen
-    root2 = _tree(tmp_path / "b", {"sqlglot/ext.pyx": "UNITS\n"})         # a non-Python source spells it
+    root2 = _tree(tmp_path / "b", {"sqlglot/ext.pyx": "UNITS = 1\n"})     # a non-Python source spells it (even as its own)
     assert modglobal.reached_elsewhere(root2, PATH, "UNITS") is True
 
 
@@ -327,8 +348,8 @@ def test_hive_key_edit_selects_what_an_edit_of_the_reading_lines_selects():
 
 
 @needs_pin
-def test_a_constant_that_a_class_body_reads_is_not_narrowed():
-    # HIVE_DATE_FORMAT is read by class-level tables: the module-level rule stays
+def test_a_constant_that_another_module_imports_is_not_narrowed():
+    # sqlglot/generators/spark2.py imports HIVE_DATE_FORMAT: the module-level rule stays
     _, why = _select(HIVE, "HIVE_DATE_FORMAT = \"'yyyy-MM-dd'\"", "HIVE_DATE_FORMAT = \"'yyyy-MM-da'\"")
     assert not why.startswith("G "), why
 
@@ -350,9 +371,136 @@ _KNOWN = {
 @needs_pin
 def test_pin_has_no_namespace_walkers():
     seen = set()
-    for top in ("sqlglot", "tests"):
-        for p in sorted((PIN / top).rglob("*.py")):
-            for line in p.read_text(encoding="utf-8").splitlines():
-                if _WALK.search(line):
-                    seen.add((p.relative_to(PIN).as_posix(), line.strip()))
+    for p in sorted(PIN.rglob("*.py")):
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if _WALK.search(line):
+                seen.add((p.relative_to(PIN).as_posix(), line.strip()))
     assert seen == _KNOWN, sorted(seen ^ _KNOWN)
+
+
+# Attribute access by a computed name on something an import statement bound (a module, or a name taken from one).
+# These are all there are in the whole checkout, and none can hand out plain data bound at module level:
+#   dialects/__init__.py   module __getattr__: `name` is a key of its own table of dialect names (spelled there)
+#   dialects/dialect.py    the dir(module) walk of _try_load: keeps subclasses of Dialect only
+#   optimizer/__init__.py  module __getattr__: `attr` comes from its own table of rule names (spelled there)
+#   serde.py               getattr(module, class_name)(): the result is called, a tuple or a dict would raise
+_DYN_KNOWN = {
+    ("sqlglot/dialects/__init__.py", "getattr", "module", "name"),
+    ("sqlglot/dialects/dialect.py", "getattr", "module", "attr_name"),
+    ("sqlglot/optimizer/__init__.py", "getattr", "importlib.import_module(module_name)", "attr"),
+    ("sqlglot/serde.py", "getattr", "module", "class_name"),
+}
+
+
+@needs_pin
+def test_pin_dynamic_attribute_access_on_imported_names_is_known():
+    seen = set()
+    for p in sorted(PIN.rglob("*.py")):
+        tree = ast.parse(p.read_text(encoding="utf-8"))
+        bound = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                bound.update(a.asname or a.name.split(".")[0] for a in n.names)
+            elif isinstance(n, ast.ImportFrom):
+                bound.update(a.asname or a.name for a in n.names)
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("getattr", "setattr", "delattr", "hasattr")):
+                continue
+            if len(n.args) < 2 or isinstance(n.args[1], ast.Constant):
+                continue  # a literal name is a string constant: reached_elsewhere and find look at those
+            base = n.args[0]
+            text = ast.unparse(base)
+            while isinstance(base, (ast.Attribute, ast.Subscript, ast.Call)):
+                base = base.func if isinstance(base, ast.Call) else base.value
+            if (isinstance(base, ast.Name) and base.id in bound) or "module" in text or "import" in text:
+                seen.add((p.relative_to(PIN).as_posix(), n.func.id, text, ast.unparse(n.args[1])))
+    assert seen == _DYN_KNOWN, sorted(seen ^ _DYN_KNOWN)
+
+
+def _eligible():
+    """(file, NAME) of every module-body pure literal of sqlglot/ that find() accepts for an edit of one of its constants."""
+    out = []
+    for p in sorted((PIN / "sqlglot").rglob("*.py")):
+        rel = p.relative_to(PIN).as_posix()
+        text = p.read_text(encoding="utf-8")
+        tree = pyscope.parse(text, rel)
+        for st in tree.body:
+            t = modglobal._target(st)
+            if t is None or not modglobal.pure(t[1]):
+                continue
+            consts = [c for c in ast.walk(t[1]) if isinstance(c, ast.Constant)]
+            if consts and modglobal.find(tree, tree, [(consts[0], None)], text):
+                out.append((rel, t[0].id))
+    return out
+
+
+def _index():
+    """Per .py file of the whole checkout: every identifier the parser sees (normalized, whatever the spelling), every
+    string constant (escapes resolved and adjacent literals joined), the names its module body binds, star imports."""
+    idx = {}
+    for p in sorted(PIN.rglob("*.py")):
+        tree = ast.parse(p.read_text(encoding="utf-8"))
+        ids, strs, attrs, imported, glob = set(), [], set(), set(), set()
+        star = False
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Name):
+                ids.add(n.id)
+            elif isinstance(n, ast.Attribute):
+                ids.add(n.attr)
+                attrs.add(n.attr)
+            elif isinstance(n, ast.alias):
+                star |= n.name == "*"
+                for x in (n.asname, n.name, *n.name.split(".")):
+                    if x:
+                        ids.add(x)
+                        imported.add(x)
+            elif isinstance(n, ast.arg):
+                ids.add(n.arg)
+            elif isinstance(n, ast.keyword):
+                if n.arg:
+                    ids.add(n.arg)
+            elif isinstance(n, (ast.Global, ast.Nonlocal)):
+                ids.update(n.names)
+                glob.update(n.names)
+            elif isinstance(n, ast.Constant):
+                v = n.value
+                if isinstance(v, bytes):
+                    v = v.decode("latin-1")
+                if isinstance(v, str):
+                    strs.append(v)
+            for f in ("name", "rest"):
+                x = getattr(n, f, None)
+                if isinstance(x, str):
+                    ids.add(x)
+        bound = {t[0].id for t in map(modglobal._target, tree.body) if t is not None}
+        idx[p.relative_to(PIN).as_posix()] = (ids, strs, attrs, imported, glob, bound, star)
+    return idx
+
+
+@needs_pin
+def test_the_byte_scan_agrees_with_a_full_parse_for_every_name_the_rule_can_fire_on():
+    """reached_elsewhere skips a file whose bytes do not hold the name. A name can also be spelled through an escape in
+    a string, through adjacent string literals ("UN" "ITS") or with a compatibility character the parser normalizes.
+    Every other file of a patch G accepts is the pinned file, and the names G can fire on are fixed by the pinned tree,
+    so all of them are checked here once, exhaustively: wherever a full parse of the whole checkout finds a file that
+    may reach the name, the byte scan must have said so too."""
+    names = _eligible()
+    assert ("sqlglot/generators/hive.py", "TIME_DIFF_FACTOR") in names
+    assert ("sqlglot/generators/hive.py", "DIFF_MONTH_SWITCH") in names
+    assert ("sqlglot/generators/hive.py", "HIVE_DATE_FORMAT") in names  # find() alone accepts it; spark2.py imports it
+    assert modglobal.reached_elsewhere(PIN, "sqlglot/generators/hive.py", "HIVE_DATE_FORMAT") is True
+    assert modglobal.reached_elsewhere(PIN, "sqlglot/generators/hive.py", "DATE_DELTA_INTERVAL") is False  # parsers/tsql.py has its own
+    idx = _index()
+    for rel, name in names:
+        word = modglobal._word(name)
+        full = False
+        for other, (ids, strs, attrs, imported, glob, bound, star) in idx.items():
+            if other == rel:
+                continue
+            in_str = any(word.search(x) for x in strs)
+            if name not in ids and not in_str:
+                continue
+            if name not in bound or star or name in imported or name in attrs or name in glob or in_str:
+                full = True
+        cheap = modglobal.reached_elsewhere(PIN, rel, name)
+        assert cheap or not full, (rel, name)

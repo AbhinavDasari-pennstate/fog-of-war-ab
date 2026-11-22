@@ -26,7 +26,8 @@ import re
 
 _SIGN = (ast.USub, ast.UAdd)
 # the module's own namespace reached without spelling a global's name
-_DYNAMIC = re.compile(r"(?<![A-Za-z0-9_])(globals|locals|vars|eval|exec|__dict__|__import__|import_module|modules|getmembers)(?![A-Za-z0-9_])")
+_DYNAMIC = re.compile(r"(?<![A-Za-z0-9_])(globals|locals|vars|eval|exec|__dict__|__import__|import_module|modules|getmembers"
+                      r"|__globals__|f_globals|_getframe|currentframe)(?![A-Za-z0-9_])")
 
 
 def _number(n) -> bool:
@@ -119,6 +120,8 @@ def find(old_tree, new_tree, diffs, old_text: str):
     except Exception:
         return None
     name = tnode.id
+    if name.startswith("__") and name.endswith("__"):
+        return None  # the interpreter reads these without a Name node (__all__ by a star import, __doc__ by doctest)
     if _DYNAMIC.search(old_text):
         return None
     word = _word(name)
