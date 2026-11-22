@@ -220,7 +220,72 @@ def main():
                 want.append(ID2N[hit[0]])
         return sorted(set(want)) or None
 
-    if MODE == "C":
+    if MODE in ("E", "G"):
+        # Split of probe C. Same candidates (commits where stripping tests >= 2 s changes the cost): A0 = the plain-data
+        # constant one, F0/F1/F2 = the big F ones by saving, largest first. E drops giants on A0 + F0, G on A0 + F1.
+        # Misses (E, G): (1,1) A0 needs its giant, (1,0) F0, (0,1) F1, (0,0) F2.
+        # gmask bits: 1 test_max_nodes, 2 test_execute_tpcds, 4 test_generator_memory, 8 executor tpch pair,
+        #             16 optimizer test_tpcds, 32 any other test >= 2 s.
+        # tf bits: 1 has no .py file (fixture-only), 2 touches tpc-ds.sql, 4 touches tpc-h.sql.
+        # E code = gmask(A0) + 64*fidx(A0) + 16384*gmask(F0)   (fidx = index of A0's file in sorted sqlglot/**/*.py, 255 unknown)
+        # G code = tf(F0) + 8*gmask(F1) + 512*tf(F1) + 4096*gmask(F2) + 262144*tf(F2)
+        N2ID = {t["number"]: t["id"] for t in tests}
+        GBIT = (("::test_max_nodes", 1), ("::test_execute_tpcds", 2), ("::test_generator_memory", 4),
+                ("::test_execute_tpch", 8), ("::test_optimized_tpch", 8), ("TestOptimizer::test_tpcds", 16))
+        cand = {"A": [], "F": []}
+        for c in order:
+            cat, txt, fs = info[c]
+            k = cost(rows[c])
+            if k == 0:
+                continue
+            if cat == "A" and const_category(txt) != 1:
+                key = "A"
+            elif cat == "F" and k > SMALL:
+                key = "F"
+            else:
+                continue
+            new = strip_giants(rows[c])
+            if cost(new) != k:
+                cand[key].append((cost(new) - k, c, new, [w[:] for w in rows[c]]))
+        for key in cand:
+            cand[key].sort(key=lambda t: (t[0], t[1]))
+
+        def gmask(item):
+            m = 0
+            for w in item[3]:
+                for n in w:
+                    if DUR[n] >= GIANT:
+                        tid = N2ID[n]
+                        m |= next((b for suf, b in GBIT if tid.endswith(suf)), 32)
+            return m
+
+        def tf(item):
+            names = [f[2:] if f.startswith("b/") else f for f in info[item[1]][2]]
+            return ((1 if not any(f.endswith(".py") for f in names) else 0)
+                    | (2 if any(f.endswith("tpc-ds.sql") for f in names) else 0)
+                    | (4 if any(f.endswith("tpc-h.sql") for f in names) else 0))
+
+        def fidx(item):
+            try:
+                allpy = sorted(p.relative_to(SRC).as_posix() for p in (SRC / "sqlglot").rglob("*.py"))
+                f = next(iter(info[item[1]][2]))
+                return allpy.index(f[2:] if f.startswith("b/") else f)
+            except Exception:
+                return 255
+
+        A, F = cand["A"], cand["F"]
+        g = lambda lst, i, fn: fn(lst[i]) if len(lst) > i else 0
+        if MODE == "E":
+            picks = A[:1] + F[:1]
+            code = g(A, 0, gmask) + 64 * g(A, 0, fidx) + 16384 * g(F, 0, gmask)
+        else:
+            picks = A[:1] + F[1:2]
+            code = g(F, 0, tf) + 8 * g(F, 1, gmask) + 512 * g(F, 1, tf) + 4096 * g(F, 2, gmask) + 262144 * g(F, 2, tf)
+        for item in picks:
+            rows[item[1]] = item[2]
+            dropped.add(item[1])
+        note = f"A={[(i[1], -i[0]) for i in A]} F={[(i[1], -i[0]) for i in F]}"
+    elif MODE == "C":
         st = {"A": [0, 0], "F": [0, 0]}
         for c in order:
             cat, txt, fs = info[c]
