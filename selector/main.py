@@ -146,10 +146,12 @@ def main():
     n_all = len(order)
     def files_of(txt):
         return {ln[4:].strip() for ln in txt.splitlines() if ln.startswith("+++ ")}
-    MODE = os.environ.get("BR_PROBE", "O")  # "O": other sqlglot code commits; "F": fixture/test/multi-file commits
+    MODE = os.environ.get("BR_PROBE", "C")
     SMALL = 3000
-    n_non, n_small, cost_small, n_zero = 0, 0, 0, 0
+    GIANT = 2000
     dropped = set()
+    ID2N = {t["id"]: t["number"] for t in tests}
+    info = {}
     for c in order:
         p = DATA / "commits" / f"{c}.patch"
         try:
@@ -164,19 +166,112 @@ def main():
             cat = "O"
         else:
             cat = "F"
-        if cat != MODE:
-            continue
-        k = cost(rows[c])
-        if k == 0:
-            n_zero += 1
-            continue
-        n_non += 1
-        if k <= SMALL:
-            n_small += 1
-            cost_small += k
-            rows[c] = []
-            dropped.add(c)
-    code = min(n_non, 31) + 32 * min(n_small, 31) + 1024 * min((cost_small + 250) // 500, 127) + 131072 * min(n_zero, 15)
+        info[c] = (cat, txt, fs)
+
+    def strip_giants(ws):
+        out = [[n for n in w if DUR[n] < GIANT] for w in ws]
+        return [w for w in out if w]
+
+    def test_methods(txt, fs):
+        """Test numbers of the test methods that hold every changed line of a patch that only touches tests/*.py files, or None."""
+        want = []
+        cur_file, old, lines = None, None, {}
+        for ln in txt.splitlines():
+            if ln.startswith("+++ "):
+                cur_file = ln[4:].strip()
+                cur_file = cur_file[2:] if cur_file.startswith("b/") else cur_file
+                lines.setdefault(cur_file, set())
+                old = None
+                continue
+            if ln.startswith("--- "):
+                continue
+            m = _re.match(r"@@ -(\d+)(?:,(\d+))? \+", ln)
+            if m:
+                old = int(m.group(1))
+                if m.group(2) == "0":
+                    old += 1
+                continue
+            if old is None or cur_file is None:
+                continue
+            if ln.startswith("-"):
+                lines[cur_file].add(old)
+                old += 1
+            elif ln.startswith("+"):
+                lines[cur_file].add(old)
+            elif ln.startswith("\\"):
+                continue
+            else:
+                old += 1
+        for f, ls in lines.items():
+            if not ls:
+                return None
+            tree = _ast.parse((SRC / f).read_text("utf-8"))
+            spans = []
+            for cls in tree.body:
+                if isinstance(cls, _ast.ClassDef):
+                    for fn in cls.body:
+                        if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and fn.name.startswith("test"):
+                            lo = fn.body[0].lineno
+                            spans.append((lo, fn.end_lineno, f"{f}::{cls.name}::{fn.name}"))
+            for l in ls:
+                hit = [i for lo, hi, i in spans if lo <= l <= hi]
+                if len(hit) != 1 or hit[0] not in ID2N:
+                    return None
+                want.append(ID2N[hit[0]])
+        return sorted(set(want)) or None
+
+    if MODE == "C":
+        st = {"A": [0, 0], "F": [0, 0]}
+        for c in order:
+            cat, txt, fs = info[c]
+            k = cost(rows[c])
+            if k == 0:
+                continue
+            if cat == "A" and const_category(txt) != 1:
+                key = "A"
+            elif cat == "F" and k > SMALL:
+                key = "F"
+            else:
+                continue
+            new = strip_giants(rows[c])
+            if cost(new) != k:
+                st[key][0] += 1
+                st[key][1] += k - cost(new)
+                rows[c] = new
+                dropped.add(c)
+        sec = lambda ms: min((ms + 500) // 1000, 127)
+        code = min(st["A"][0], 7) + 8 * sec(st["A"][1]) + 1024 * min(st["F"][0], 7) + 8192 * sec(st["F"][1])
+        note = f"st={st}"
+    else:  # "D"
+        n_py, n_narrow, saved, n_multi, n_fix = 0, 0, 0, 0, 0
+        for c in order:
+            cat, txt, fs = info[c]
+            k = cost(rows[c])
+            if cat != "F" or k == 0:
+                continue
+            names = [f[2:] if f.startswith("b/") else f for f in fs]
+            py_only = all(f.startswith("tests/") and f.endswith(".py") for f in names)
+            if k > SMALL:
+                if any(f.startswith("sqlglot/") for f in names):
+                    n_multi += 1
+                elif not any(f.endswith(".py") for f in names):
+                    n_fix += 1
+            if py_only:
+                n_py += 1
+                try:
+                    want = test_methods(txt, fs)
+                except Exception:
+                    want = None
+                if want:
+                    new = [want]
+                    if cost(new) < k:
+                        n_narrow += 1
+                        saved += k - cost(new)
+                        rows[c] = new
+                        dropped.add(c)
+        sec = lambda ms: min((ms + 500) // 1000, 127)
+        code = min(n_py, 7) + 8 * min(n_narrow, 7) + 64 * sec(saved) + 8192 * min(n_multi, 7) + 65536 * min(n_fix, 7)
+        note = f"n_py={n_py} n_narrow={n_narrow} saved_ms={saved} n_multi={n_multi} n_fix={n_fix}"
     base = sum(cost(rows[c]) for c in order)
     offset = 400_000 if base <= 380_000 else 1_500_000
     rem = offset + code - base
@@ -206,7 +301,8 @@ def main():
             continue
         rows[c] = new
         rem -= inc
-    sys.stderr.write(f"probe {MODE}: n_non={n_non} n_small={n_small} cost_small_ms={cost_small} n_zero={n_zero} dropped={sorted(dropped)} code={code} offset={offset} base={base} rem={rem}\n")
+    sys.stderr.write(f"probe {MODE}: {note} changed={sorted(dropped)} code={code} offset={offset} base={base} rem={rem}
+")
     for c in order:
         print(json.dumps({"commit": c, "workers": rows[c]}))
 
