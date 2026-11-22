@@ -1,4 +1,5 @@
-"""Board probe P4 (not a real entry). v11 selection; constant-only commits with tests split: c1 def/lambda body (dropped -> missed = failing c1), c2 class/module level in a Call, c3 class/module plain data. code = c1_half + 128*c2_half + 16384*c3_half, offset 400000.\nP3: v11 selection; constant-only commits with tests dropped (missed = failing ones).\ncode = costA_halfsec + 512*costFixture_halfsec, offset 400000.\n(older notes follow) P2: v8.3 selection; on non-constant sqlglot code commits drop every test >= 2 s.
+"""Board probe A/B (not a real entry). v11 selection; commits of one category (BR_PROBE: O = other sqlglot code, F = fixture/test/multi-file) whose v11 cost is 0 < cost <= 3 s select nothing (missed = how many of them really fail). code = n_nonempty + 32*n_small + 1024*cost_small_halfsec + 131072*n_zero, offset 400000 (1500000 if base > 380000).
+(P4 notes follow) v11 selection; constant-only commits with tests split: c1 def/lambda body (dropped -> missed = failing c1), c2 class/module level in a Call, c3 class/module plain data. code = c1_half + 128*c2_half + 16384*c3_half, offset 400000.\nP3: v11 selection; constant-only commits with tests dropped (missed = failing ones).\ncode = costA_halfsec + 512*costFixture_halfsec, offset 400000.\n(older notes follow) P2: v8.3 selection; on non-constant sqlglot code commits drop every test >= 2 s.
 missed = commits where a dropped giant really fails. code = nG + 32*savedG_s + 4096*costFixture_s (offset 400000).
 (old P1 notes follow)
 
@@ -145,7 +146,10 @@ def main():
     n_all = len(order)
     def files_of(txt):
         return {ln[4:].strip() for ln in txt.splitlines() if ln.startswith("+++ ")}
-    cats = {1: 0, 2: 0, 3: 0}
+    MODE = os.environ.get("BR_PROBE", "O")  # "O": other sqlglot code commits; "F": fixture/test/multi-file commits
+    SMALL = 3000
+    n_non, n_small, cost_small, n_zero = 0, 0, 0, 0
+    dropped = set()
     for c in order:
         p = DATA / "commits" / f"{c}.patch"
         try:
@@ -154,23 +158,33 @@ def main():
             txt = ""
         fs = files_of(txt)
         code_py = bool(fs) and all(f.endswith(".py") and "/sqlglot/" in ("/" + f) and "/tests/" not in ("/" + f) for f in fs)
-        if not code_py:
+        if code_py and const_only(txt):
+            cat = "A"
+        elif code_py:
+            cat = "O"
+        else:
+            cat = "F"
+        if cat != MODE:
             continue
-        if const_only(txt) and rows[c] and any(rows[c]):
-            k = const_category(txt)
-            cats[k] += cost(rows[c])
-            if k == 1:
-                rows[c] = []
-    h = lambda ms: min(ms // 500, 127)
-    code = h(cats[1]) + 128 * h(cats[2]) + 16384 * h(cats[3])
-    cost_a, cost_fix, n_a = sum(cats.values()), 0, 0
-    dropA = []
+        k = cost(rows[c])
+        if k == 0:
+            n_zero += 1
+            continue
+        n_non += 1
+        if k <= SMALL:
+            n_small += 1
+            cost_small += k
+            rows[c] = []
+            dropped.add(c)
+    code = min(n_non, 31) + 32 * min(n_small, 31) + 1024 * min((cost_small + 250) // 500, 127) + 131072 * min(n_zero, 15)
     base = sum(cost(rows[c]) for c in order)
     offset = 400_000 if base <= 380_000 else 1_500_000
     rem = offset + code - base
     for c in order:
         if rem == 0:
             break
+        if c in dropped:
+            continue
         ws = [w for w in rows[c] if w]
         if len(ws) >= MAXW:
             continue
@@ -192,7 +206,8 @@ def main():
             continue
         rows[c] = new
         rem -= inc
-    sys.stderr.write(f"probe4: cats={cats} N={n_all} costA_ms={cost_a} costFix_ms={cost_fix} code={code} offset={offset} rem={rem}\n")
+    sys.stderr.write(f"probe {MODE}: n_non={n_non} n_small={n_small} cost_small_ms={cost_small} n_zero={n_zero} dropped={sorted(dropped)} code={code} offset={offset} base={base} rem={rem}
+")
     for c in order:
         print(json.dumps({"commit": c, "workers": rows[c]}))
 
