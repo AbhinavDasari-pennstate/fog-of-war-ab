@@ -16,6 +16,7 @@ from pathlib import Path
 
 import diffparse
 import attrrule
+import modglobal
 import pyscope
 import valrule
 import weakmut
@@ -699,6 +700,36 @@ def _defaults_only(ctx: Ctx, path: str, diffs, old_tree, new_tree, ranges):
     return out
 
 
+def _private_global(ctx: Ctx, path: str, diffs, old_tree, new_tree, old_text: str):
+    """G: tests that depend on an edit of constants inside a module-level pure literal that only def bodies of the same
+    module read and no other file can reach (selector/modglobal.py), or None when the edit is anything else.
+
+    Binding such a literal runs no code, so the import is the same; the new value is seen only by code that reads the
+    name, and every read is a statement inside a def of this file. So the edit is an edit of each of those statements
+    and gets what a direct edit of the statement gets (_func_level): the tests that ran it, the whole def when a line is
+    unstable or has no record, every importer when a line ran at import. A patch of several files keeps the older rule
+    (another file of the same patch could add a reader), and so does a read that no recorded test ran."""
+    if not ctx.single or ctx.m.stmts.get(path) is None or not ctx.m.lines.get(path):
+        return None
+    f = modglobal.find(old_tree, new_tree, diffs, old_text)
+    if f is None:
+        return None
+    name, reads = f
+    if modglobal.reached_elsewhere(ctx.src, path, name):
+        return None
+    out = 0
+    for ln in reads:
+        s = ctx.m.stmt(path, ln)
+        if s is None or s[2] != "function" or not s[3]:
+            return None
+        got = _func_level(ctx, path, s)
+        if not got:
+            return None  # a read that no recorded test ran: no evidence either way
+        out |= got
+    ctx.note(f"G {path}: {name} is read on line(s) {', '.join(map(str, reads))} only")
+    return out
+
+
 def _one(ctx: Ctx, change) -> tuple[int, str]:
     m = ctx.m
     path = change.path_new
@@ -765,6 +796,12 @@ def _one(ctx: Ctx, change) -> tuple[int, str]:
                     return got | sr, f"V {path}: string constants in {len(sents)} set(s) looked up by recorded tests"
         except Exception:
             pass
+        try:
+            got = _private_global(ctx, path, diffs, old_tree, new_tree, old_text)
+        except Exception:
+            got = None
+        if got is not None:
+            return got | sr, f"G {path}: constants of a module-level literal that only function bodies of this module read"
     ctx.narrow = None
     ctx.doc_only = _doc_only(old_tree, diffs)
     if ctx.single and path.startswith("sqlglot/"):
