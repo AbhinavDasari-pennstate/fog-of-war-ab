@@ -202,8 +202,8 @@ class Ctx:
         pass, fewer than three seeds), no range for the lines, a call made by collection itself ("<nomod>"), a module body the import map
         does not know (a test module), or a probe that cannot run."""
         w = getattr(self.m, "impfn", None)
-        if w is None or self.old_tree is None or _cached_def(self.old_tree, lo, hi):
-            return self.wide(path)  # a cached def's results outlive the import that computed them: every importer
+        if w is None or self.old_tree is None or _unsafe_def(self.old_tree, lo, hi):
+            return self.wide(path)  # a cache, or a def that may write state the importers do not own (H1): every importer
         ranges, base = w
         rs = ranges.get(path)
         hit = [(a, b) for a, b, _ in rs if a <= hi and lo <= b] if rs else []
@@ -247,14 +247,109 @@ class Ctx:
 
 
 _CACHE_DECORATOR = re.compile(r"cache|memo|lru|once", re.I)
+# Calls that read or write the namespace of a module or object by name, or load modules.
+_STATE_CALLS = frozenset({"globals", "vars", "locals", "setattr", "delattr", "exec", "eval", "__import__", "import_module", "reload"})
+# Methods that change the object they are called on (a container, a node, a registry, a file).
+_MUTATORS = frozenset({"append", "add", "update", "setdefault", "pop", "popitem", "extend", "insert", "remove", "clear", "register", "discard",
+                       "sort", "reverse", "appendleft", "extendleft", "popleft", "set", "write", "writelines", "__setitem__", "__delitem__",
+                       "__setattr__", "__delattr__"})
+_FRESH_CALLS = frozenset({"list", "dict", "set", "tuple", "frozenset", "bytearray", "defaultdict", "deque", "Counter", "OrderedDict", "sorted",
+                          "enumerate", "zip", "reversed", "range"})
+_FRESH_NODES = (ast.List, ast.Dict, ast.Set, ast.Tuple, ast.ListComp, ast.DictComp, ast.SetComp, ast.GeneratorExp, ast.Constant, ast.JoinedStr)
 
 
-def _cached_def(tree, lo: int, hi: int) -> bool:
-    """True when a def around lines lo..hi carries a decorator that looks like a cache (functools.cache, lru_cache, memoize, once)."""
+def _is_fresh(v) -> bool:
+    """A value that is a new object made by the def itself: a display, a comprehension, a constant, or a call of a plain container constructor."""
+    if isinstance(v, _FRESH_NODES):
+        return True
+    if isinstance(v, ast.Call):
+        f = v.func
+        return (isinstance(f, ast.Name) and f.id in _FRESH_CALLS) or (isinstance(f, ast.Attribute) and f.attr == "copy")
+    return False
+
+
+def _root(node):
+    """The name an attribute or subscript chain starts from (a Name), or None when it starts from a call or anything else."""
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        node = node.value
+    return node if isinstance(node, ast.Name) else None
+
+
+def _writes_nonlocal(fn) -> bool:
+    """True unless the def (or lambda) provably leaves every object it did not create untouched.
+
+    What the answer means: R2 credits an import-time run of a function to the module bodies that ran it. That holds only when the run has no
+    effect that outlives those bodies and is read by a test that does not import them: a memo (`globals()[name] = attr`), a registry, a cache,
+    an instance or class attribute, a container handed in. So any of these is a "yes": a `global` or `nonlocal` statement; a call that reads or
+    writes names (globals, vars, locals, setattr, delattr, exec, eval, import_module, __import__, reload) or a use of `.__dict__` or
+    `sys.modules`; a store or delete (assignment, augmented assignment, `del`, a `for` or `with` target, `x += v` on a name that is not fresh) into an attribute or subscript whose
+    root is not a local name bound ONLY to a fresh object made in the def (a parameter, `self` and `cls` included, a loop variable, anything
+    bound from a call that may return a shared object counts as non-local); a call of a mutating method (append, add, update, setdefault, pop,
+    extend, insert, remove, clear, register, set, write ...) on such a root, or on a call result. Any doubt is "yes"."""
+    params, handled = set(), set()
+    for n in ast.walk(fn):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            a = n.args
+            params.update(x.arg for x in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg] if x is not None)
+            if not isinstance(n, ast.Lambda) and n is not fn:
+                params.add(n.name)
+        elif isinstance(n, ast.ClassDef):
+            params.add(n.name)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            params.add(n.name)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            params.update((x.asname or x.name).split(".")[0] for x in n.names)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            return True
+    fresh = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign) or (isinstance(n, ast.AnnAssign) and n.value is not None):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                if isinstance(t, ast.Name):
+                    handled.add(id(t))
+                    (fresh if _is_fresh(n.value) else params).add(t.id)
+        elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+            handled.add(id(n.target))  # `x += v` changes the object x names in place when it is a list or set: judged below
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)) and id(n) not in handled:
+            params.add(n.id)  # a loop, with, walrus, comprehension or augmented target, or a deleted name: not provably fresh
+    fresh -= params
+
+    def local(root) -> bool:
+        return root is not None and root.id in fresh
+
+    for n in ast.walk(fn):
+        if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and not local(n.target):
+            return True
+        if isinstance(n, ast.Call):
+            f = n.func
+            if isinstance(f, ast.Name) and f.id in _STATE_CALLS:
+                return True
+            if isinstance(f, ast.Attribute):
+                if f.attr in _STATE_CALLS:
+                    return True
+                if f.attr in _MUTATORS and not local(_root(f.value)):
+                    return True
+        elif isinstance(n, ast.Attribute):
+            if n.attr == "__dict__" or (n.attr == "modules" and isinstance(n.value, ast.Name) and n.value.id == "sys"):
+                return True
+            if isinstance(n.ctx, (ast.Store, ast.Del)) and not local(_root(n.value)):
+                return True
+        elif isinstance(n, ast.Subscript) and isinstance(n.ctx, (ast.Store, ast.Del)) and not local(_root(n.value)):
+            return True
+    return False
+
+
+def _unsafe_def(tree, lo: int, hi: int) -> bool:
+    """True when a def or lambda around lines lo..hi (the one the edit sits in, and every def it is nested in) is a cache by decorator or
+    does not provably leave non-local state alone (_writes_nonlocal). R2 then keeps the wide answer."""
     for n in ast.walk(tree):
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.decorator_list:
-            around = min(d.lineno for d in n.decorator_list) <= hi and lo <= (n.end_lineno or n.lineno)
-            if around and any(_CACHE_DECORATOR.search(ast.unparse(d)) for d in n.decorator_list):
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        decos = getattr(n, "decorator_list", ())
+        top = min([n.lineno] + [d.lineno for d in decos])
+        if top <= hi and lo <= (n.end_lineno or n.lineno):
+            if any(_CACHE_DECORATOR.search(ast.unparse(d)) for d in decos) or _writes_nonlocal(n):
                 return True
     return False
 

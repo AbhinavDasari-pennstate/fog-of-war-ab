@@ -5,8 +5,10 @@ tests that ran the lines, plus what the import probe finds. Anything the map or 
 
 Unit tests use a stub of the maps. The real-source tests need BR_SRC and the kit."""
 
+import ast
 import json
 import marshal
+import os
 import sys
 import zlib
 
@@ -210,3 +212,112 @@ def test_noise_a_comment_only_edit_of_the_same_function_selects_as_before():
     got, why = rules.select(diffparse.parse(make_patch(rel, old, new)), load(str(ROOT / "maps")), tests, src_root=PIN)
     assert "R2" not in why and "ast unchanged" in why
     assert len(got) == 0, len(got)
+
+
+# ---- H1: a def that writes state the importers do not own keeps the wide answer ---------------------------------
+
+UNSAFE = {
+    "memo_in_module_globals": "def __getattr__(name):\n    attr = look(name)\n    globals()[name] = attr\n    return attr\n",
+    "h1_mutant": "def __getattr__(name):\n    attr = look(name)\n    globals()[name] = attr if name != 'BigQuery' else None\n    return attr\n",
+    "global_statement": "def f():\n    global X\n    X = 1\n",
+    "instance_attribute_store": "def f(self):\n    self.x = 1\n",
+    "augmented_instance_attribute": "def f(self):\n    self._index += 1\n",
+    "class_registry_store": "def f(cls, k, v):\n    cls.REG[k] = v\n",
+    "append_to_attribute": "def f(self, e):\n    self.errors.append(e)\n",
+    "append_to_alias_of_non_local": "def f(self):\n    d = self.table\n    d.append(1)\n",
+    "setitem_on_alias_of_non_local": "def f(self, k):\n    d = self.table\n    d[k] = 1\n",
+    "store_on_loop_variable": "def f(items):\n    for x in items:\n        x.y = 1\n",
+    "sys_modules": "def f(m):\n    sys.modules['a'] = m\n",
+    "dunder_dict": "def f(o):\n    return o.__dict__\n",
+    "setattr_call": "def f(o):\n    setattr(o, 'a', 1)\n",
+    "delete_attribute": "def f(self):\n    del self.x\n",
+    "mutating_call_on_a_call_result": "def f():\n    get().append(1)\n",
+    "in_place_add_on_an_alias": "def f(a):\n    n = a\n    n += [1]\n",
+    "cache_decorator": "@functools.lru_cache(maxsize=None)\ndef f(x):\n    return x\n",
+    "global_in_a_nested_def": "def f(x):\n    def g():\n        global Y\n        Y = 1\n    return g\n",
+    "lambda_that_sets_an_attribute": "f = lambda self: self.__setattr__('a', 1)\n",
+    "import_module": "def f(n):\n    return importlib.import_module(n)\n",
+}
+SAFE = {
+    "pure_property": "def name(self):\n    return self.text('this') or '?'\n",
+    "builds_and_returns_a_list": "def f(xs):\n    out = []\n    for x in xs:\n        out.append(x)\n    return out\n",
+    "builds_and_returns_a_dict": "def f(k, v):\n    d = {}\n    d[k] = v\n    return d\n",
+    "local_counter": "def f():\n    n = 0\n    n += 1\n    return n\n",
+    "copy_then_store": "def f(a):\n    b = a.copy()\n    b['k'] = 1\n    return b\n",
+    "comprehension": "def f(xs):\n    return [x for x in xs]\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(UNSAFE))
+def test_def_that_may_write_non_local_state_is_unsafe(name):
+    src = UNSAFE[name]
+    assert rules._unsafe_def(ast.parse(src), 1, len(src.splitlines())) is True
+
+
+@pytest.mark.parametrize("name", sorted(SAFE))
+def test_def_that_leaves_non_local_state_alone_is_safe(name):
+    src = SAFE[name]
+    assert rules._unsafe_def(ast.parse(src), 1, len(src.splitlines())) is False
+
+
+def test_import_time_memoiser_keeps_the_wide_answer():
+    text = "# 1\n# 2\n# 3\n# 4\ndef f(name):\n    attr = look(name)\n    globals()[name] = attr\n    return attr\n"
+    assert run(Stub({PATH: [(5, 8, [M1])]}, il=(7,)), s=(7, 7, "function", 5, 8, ""), text=text) == WIDE
+
+
+def test_memoiser_that_is_not_the_edited_def_but_encloses_it_keeps_the_wide_answer():
+    text = ("# 1\n# 2\ndef outer(name):\n    def f(x):\n        return x or '?'\n    globals()[name] = f\n    return f\n")
+    assert run(Stub({PATH: [(3, 7, [M1])]}, il=(5,)), s=(5, 5, "function", 4, 5, ""), text=text) == WIDE
+
+
+@needs_pin
+def test_h1_memoising_getattr_edit_keeps_test_jinja():
+    """The reviewer's mutant: `globals()[name] = attr` of sqlglot/dialects/__init__.py:__getattr__ stores the dialect class on the module. A
+    test that reads sqlglot.dialects.BigQuery later finds it there; the edit makes it None and test_jinja fails with an AttributeError, yet that
+    test imports none of the module bodies that ran __getattr__ at import. R2 must not narrow it. BR_TEST_MAPS: a maps copy whose impfn.bin
+    carries this interpreter's sys.version (host runs); without a usable impfn the test cannot tell and is skipped."""
+    from maps.load import load
+    import diffparse
+
+    maps = load(os.environ.get("BR_TEST_MAPS") or str(ROOT / "maps"))
+    if maps.impfn is None:
+        pytest.skip("no impfn map recorded by this interpreter")
+    tests = [{"number": n, "id": i, "file": i.split("::")[0], "seconds": 0.1} for n, i in enumerate(maps.ids) if i is not None]
+    rel = "sqlglot/dialects/__init__.py"
+    old = (PIN / rel).read_text("utf-8")
+    new = old.replace("        globals()[name] = attr\n", "        globals()[name] = attr if name != 'BigQuery' else None\n", 1)
+    assert new != old
+    got, why = rules.select(diffparse.parse(make_patch(rel, old, new)), maps, tests, src_root=PIN)
+    ids = {tests[n]["id"] for n in got}
+    assert "tests/test_tokens.py::TestTokens::test_jinja" in ids
+    assert "R2" not in why
+
+
+# ---- L1: the build and the loader refuse a map that cannot be trusted ---------------------------------------------
+
+def test_loader_refuses_three_equal_seeds(tmp_path):
+    _write(tmp_path, seeds=[0, 0, 0])
+    assert _maps(tmp_path).impfn is None
+
+
+def _runs(*rows):
+    return [{"seed": s, "rc": rc, "ncollected": n} for s, rc, n in rows]
+
+
+def test_build_check_accepts_three_clean_seeds():
+    import impfn
+
+    assert impfn.check_runs(_runs((0, 0, 1621), (1, 0, 1621), (2, 0, 1621)), True) == []
+
+
+@pytest.mark.parametrize("rows,needle", [
+    (((0, 0, 1621), (1, 2, 1621), (2, 0, 1621)), "collection exited 2"),  # an import error hid a test module
+    (((0, 0, 1621), (1, 0, 1620), (2, 0, 1621)), "different numbers"),
+    (((0, 0, 0), (1, 0, 0), (2, 0, 0)), "collected no test"),
+    (((0, 0, 1621), (1, 0, 1621)), "fewer than three"),
+    (((0, 0, 1621), (0, 0, 1621), (0, 0, 1621)), "fewer than three"),
+])
+def test_build_check_refuses_an_untrustworthy_run(rows, needle):
+    import impfn
+
+    assert any(needle in p for p in impfn.check_runs(_runs(*rows), True))

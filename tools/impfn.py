@@ -107,6 +107,7 @@ def record(src: str, collect: bool) -> dict:
                 except Exception:
                     pass
         ncollected = 0
+        collect_rc = 0
         if collect:
             import pytest
 
@@ -120,11 +121,30 @@ def record(src: str, collect: bool) -> dict:
             os.environ.setdefault("SKIP_INTEGRATION", "0")
             rc = pytest.main(["--collect-only", "-q", "-p", "no:cacheprovider", "-o", "addopts=", "--rootdir", src, "tests"], plugins=[Count()])
             phase["collecting"] = False
-            errors.append(f"pytest collect exit {int(rc)} items {ncollected}")
+            collect_rc = int(rc)
+            errors.append(f"pytest collect exit {collect_rc} items {ncollected}")
     finally:
         sys.setprofile(None)
-    return {"base": base, "errors": errors, "ncollected": ncollected if collect else 0,
+    return {"base": base, "errors": errors, "ncollected": ncollected if collect else 0, "rc": collect_rc,
             "range": {f: sorted((lo, hi, sorted(v)) for (lo, hi), v in d.items()) for f, d in sorted(byrange.items())}}
+
+
+def check_runs(runs: list, collect: bool) -> list:
+    """The problems that make a build unfit to commit: a seed whose collection exited nonzero (an import error hides a test module, so what
+    it called at import was not seen), a seed that collected nothing, seeds that collected different numbers of tests, fewer than three
+    distinct seeds. `runs`: [{"seed", "rc", "ncollected"}]. An empty list means the build is good."""
+    out = []
+    if len({r["seed"] for r in runs}) < 3:
+        out.append("fewer than three distinct hash seeds")
+    if collect:
+        for r in runs:
+            if r["rc"] != 0:
+                out.append(f"seed {r['seed']}: collection exited {r['rc']}")
+            if r["ncollected"] <= 0:
+                out.append(f"seed {r['seed']}: collected no test")
+        if len({r["ncollected"] for r in runs}) > 1:
+            out.append("seeds collected different numbers of tests: " + ", ".join(f"{r['seed']}={r['ncollected']}" for r in runs))
+    return out
 
 
 def main() -> int:
@@ -144,6 +164,7 @@ def main() -> int:
     base: set = set()
     errors: list = []
     ncol = 0
+    runs: list = []
     for s in seeds:
         env = dict(os.environ, PYTHONHASHSEED=str(s), PYTHONDONTWRITEBYTECODE="1")
         cmd = [sys.executable, os.path.abspath(__file__), "--child", "--src", a.src, "--out", a.out, "--seeds", a.seeds]
@@ -161,7 +182,12 @@ def main() -> int:
             d = merged.setdefault(f, {})
             for lo, hi, ms in rows:
                 d.setdefault((lo, hi), set()).update(ms)
-        print(f"seed {s}: {sum(len(v) for v in res['range'].values())} ranges, collected {res['ncollected']}", file=sys.stderr)
+        runs.append({"seed": s, "rc": res["rc"], "ncollected": res["ncollected"]})
+        print(f"seed {s}: {sum(len(v) for v in res['range'].values())} ranges, collected {res['ncollected']}, collect exit {res['rc']}", file=sys.stderr)
+    problems = check_runs(runs, not a.no_collect)
+    if problems:
+        print("impfn build refused: " + "; ".join(problems), file=sys.stderr)
+        return 1
     out = {"v": 1, "py": sys.version, "seeds": seeds, "collect": not a.no_collect and ncol > 0, "base": sorted(base),
            "range": {f: sorted((lo, hi, sorted(v)) for (lo, hi), v in d.items()) for f, d in sorted(merged.items())},
            "stats": {"files": len(merged), "ranges": sum(len(d) for d in merged.values()), "collected": ncol, "notes": errors[:40]}}

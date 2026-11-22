@@ -119,14 +119,14 @@ class Maps:
 
         The modules whose body (sqlglot or test module, or the pseudo module "<nomod>" for a call made by collection itself) ran the function
         or lambda at those lines while the repo imported or the tests were collected, over three hash seeds. None unless the file was recorded
-        by THIS interpreter (sys.version is stored), with the collection pass and at least three seeds: the caller then keeps the wide answer."""
+        by THIS interpreter (sys.version is stored), with the collection pass and at least three distinct seeds: the caller then keeps the wide answer."""
         w = getattr(self, "_impfn", 0)
         if w == 0:
             w = None
             try:
                 if os.path.exists(os.path.join(self.dir, "impfn.bin")):
                     d = _read(self.dir, "impfn.bin")
-                    if d.get("v") == 1 and d.get("py") == sys.version and d.get("collect") and len(d.get("seeds", ())) >= 3:
+                    if d.get("v") == 1 and d.get("py") == sys.version and d.get("collect") and len(set(d.get("seeds", ()))) >= 3:
                         w = (d["range"], frozenset(d.get("base", ())))
             except Exception:
                 w = None
