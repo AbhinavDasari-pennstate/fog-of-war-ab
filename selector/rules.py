@@ -200,7 +200,12 @@ class Ctx:
         one the edit sits in counts too (a closure the function built, which another body may have called). The import probe adds the tests
         that import a module the patched tree makes raise. Anything missing keeps `wide(path)`: no map (another interpreter, no collection
         pass, fewer than three seeds), no range for the lines, a call made by collection itself ("<nomod>"), a module body the import map
-        does not know (a test module), or a probe that cannot run."""
+        does not know (a test module), or a probe that cannot run.
+
+        R2_ENABLED is False in this variant: the caller-side hole (a function on the import-time call chain that stores F's result in state
+        other modules read, see R2_HOLE below) is not closed, so the wide answer stays until it is."""
+        if not R2_ENABLED:
+            return self.wide(path)
         w = getattr(self.m, "impfn", None)
         if w is None or self.old_tree is None or _unsafe_def(self.old_tree, lo, hi):
             return self.wide(path)  # a cache, or a def that may write state the importers do not own (H1): every importer
@@ -247,6 +252,12 @@ class Ctx:
 
 
 _CACHE_DECORATOR = re.compile(r"cache|memo|lru|once", re.I)
+# R2 (import_deps) off: it credits an import-time run of a function to the module bodies that ran it and to nothing else. `_unsafe_def` closes
+# the case where the edited def itself (or one around it) writes state others read. It does not close the CALLER side: a function on the
+# import-time call chain above the edited def may store the def's result in a class, module or registry that a test reads without importing
+# those bodies (measured on the pinned tree: 276 of 363 import-time ranges are reached through at least one def that `_writes_nonlocal` flags,
+# e.g. every Parser method that sets self._index). Until a chain-aware check exists, only R3 narrows.
+R2_ENABLED = False
 # Calls that read or write the namespace of a module or object by name, or load modules.
 _STATE_CALLS = frozenset({"globals", "vars", "locals", "setattr", "delattr", "exec", "eval", "__import__", "import_module", "reload"})
 # Methods that change the object they are called on (a container, a node, a registry, a file).

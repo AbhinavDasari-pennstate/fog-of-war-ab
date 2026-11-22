@@ -20,6 +20,12 @@ sys.path.insert(0, str(ROOT))
 import pyscope  # noqa: E402
 import rules  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _r2_on(monkeypatch):
+    """These tests are about what R2 does when it is on; the shipped default is off (rules.R2_ENABLED)."""
+    monkeypatch.setattr(rules, "R2_ENABLED", True)
+
+
 PATH = "sqlglot/thing.py"
 M1, M2, M3 = "sqlglot/generators/a.py", "sqlglot/generators/b.py", "sqlglot/generators/c.py"
 LAZY = "tests/dialects/test_dialect.py::TestDialect::test_lazy_load"
@@ -321,3 +327,8 @@ def test_build_check_refuses_an_untrustworthy_run(rows, needle):
     import impfn
 
     assert any(needle in p for p in impfn.check_runs(_runs(*rows), True))
+
+
+def test_r2_is_off_by_default(monkeypatch):
+    monkeypatch.setattr(rules, "R2_ENABLED", False)
+    assert run(Stub({PATH: [(5, 9, [M1])]})) == WIDE
