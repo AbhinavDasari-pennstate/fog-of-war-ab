@@ -301,8 +301,7 @@ def main():
             continue
         rows[c] = new
         rem -= inc
-    sys.stderr.write(f"probe {MODE}: {note} changed={sorted(dropped)} code={code} offset={offset} base={base} rem={rem}
-")
+    sys.stderr.write(f"probe {MODE}: {note} changed={sorted(dropped)} code={code} offset={offset} base={base} rem={rem}\n")
     for c in order:
         print(json.dumps({"commit": c, "workers": rows[c]}))
 
